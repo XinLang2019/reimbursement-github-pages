@@ -127,6 +127,10 @@ export async function mergeMaterials(items: DocItem[], requireComplete = true) {
   if (!pageCount) throw new Error('没有可合并的页面，请检查材料是否损坏或加密');
   return { blob: new Blob([new Uint8Array(await out.save())], {type:'application/pdf'}), pageCount, skipped };
 }
+export function reimbursementBasename(record: Pick<Reimbursement, 'name' | 'tripForm'>) {
+  const safe = (value: string, fallback: string) => value.trim().replace(/[\x00-\x1f\x7f\\/:*?"<>|]/g, '_').replace(/^[. ]+|[. ]+$/g, '') || fallback;
+  return `${safe(record.tripForm.traveler, '未填写报销人')}_${safe(record.name, '未命名报销')}`;
+}
 export function downloadBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob); const a = document.createElement('a');
   a.href = url; a.download = name.replace(/[\\/:*?"<>|]/g,'_'); a.style.display='none';
@@ -135,9 +139,10 @@ export function downloadBlob(blob: Blob, name: string) {
 export async function downloadRecord(record: Reimbursement, kind: 'zip' | 'pdf') {
   if (!reimbursementStatus(record).ready) throw new Error('请先进入编辑，完成三个步骤后再下载');
   const { blob: merged } = await mergeMaterials(record.items, true);
-  if (kind === 'pdf') { downloadBlob(merged, `${record.name}_合并报销材料.pdf`); return; }
+  const basename = reimbursementBasename(record);
+  if (kind === 'pdf') { downloadBlob(merged, `${basename}.pdf`); return; }
   const { createMaterialsArchive } = await import('./materials-archive');
   const ordered = exportOrder(record.items);
-  const entries = [...ordered.map((item,index)=>({file:item.file as Blob,name:formatFilename(item,index,ordered)})),{file:merged,name:'合并报销材料.pdf'}];
-  downloadBlob(await createMaterialsArchive(entries), `${record.name}_报销材料备份.zip`);
+  const entries = [...ordered.map((item,index)=>({file:item.file as Blob,name:formatFilename(item,index,ordered)})),{file:merged,name:`${basename}.pdf`,numbered:false}];
+  downloadBlob(await createMaterialsArchive(entries, undefined, basename), `${basename}.zip`);
 }

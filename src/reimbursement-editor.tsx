@@ -1,7 +1,7 @@
 "use client";
 
 import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials } from "./reimbursement-model";
+import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename } from "./reimbursement-model";
 import { saveReimbursement, storageMessage } from "./reimbursement-storage";
 import TripClaimForm from "./trip-claim-form";
 import { TripForm } from "./trip-claim";
@@ -324,11 +324,11 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       const mergedPdf = await buildMergedPdf(true);
       if (!mergedPdf) return;
       const { createMaterialsArchive } = await import("./materials-archive");
-      const entries = [...ordered.map((item, index) => ({ file: item.file as Blob, name: formatFilename(item, index, ordered) })), { file: mergedPdf, name: "合并报销材料.pdf" }];
-      const blob = await createMaterialsArchive(entries, (done, total) => setNotice(done === total ? `正在压缩 ${total} 份材料…` : `正在读取材料 ${done} / ${total}…`));
-      const date = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date());
+      const basename = reimbursementBasename({name: initial.name, tripForm});
+      const entries = [...ordered.map((item, index) => ({ file: item.file as Blob, name: formatFilename(item, index, ordered) })), { file: mergedPdf, name: `${basename}.pdf`, numbered: false }];
+      const blob = await createMaterialsArchive(entries, (done, total) => setNotice(done === total ? `正在压缩 ${total} 份材料…` : `正在读取材料 ${done} / ${total}…`), basename);
       const url = URL.createObjectURL(blob); const anchor = document.createElement("a");
-      anchor.href = url; anchor.download = `报销材料备份_${date}.zip`; anchor.style.display = "none";
+      anchor.href = url; anchor.download = `${basename}.zip`; anchor.style.display = "none";
       document.body.appendChild(anchor); anchor.click();
       window.setTimeout(() => { anchor.remove(); URL.revokeObjectURL(url); }, 60000);
       setNotice(`已发起备份下载：包含 ${ordered.length} 份按顺序编号的材料和 1 份合并 PDF`);
@@ -368,7 +368,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   function savePdf(blob: Blob | null = pdfBlob) {
     const problem = exportProblem(); if (problem) { setNotice(problem); return false; }
     if (!blob) { setNotice("请先生成 PDF"); return false; }
-    const filename = `报销材料_${new Date().toISOString().slice(0, 10)}.pdf`;
+    const filename = `${reimbursementBasename({name: initial.name, tripForm})}.pdf`;
     try {
       const legacyNavigator = window.navigator as Navigator & { msSaveOrOpenBlob?: (blob: Blob, filename: string) => boolean };
       if (legacyNavigator.msSaveOrOpenBlob) {
