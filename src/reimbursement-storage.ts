@@ -1,6 +1,6 @@
 import { DocItem, Reimbursement, reimbursementStatus } from './reimbursement-model';
 
-export type RecordSummary = { id: string; name: string; createdAt: number; updatedAt: number; fileCount: number; total: number; ready: boolean; activeStep: number };
+export type RecordSummary = { id: string; name: string; createdAt: number; updatedAt: number; fileCount: number; total: number; ready: boolean; activeStep: number; completionVersion?: number };
 type StoredItem = Omit<DocItem, 'file'> & { file: Blob; fileName: string; fileModified: number };
 type StoredRecord = Omit<Reimbursement, 'items'> & { items: StoredItem[] };
 const DB_NAME = 'reimbursement-organizer-local';
@@ -21,7 +21,7 @@ function finished(tx: IDBTransaction) { return new Promise<void>((resolve,reject
 let writes: Promise<unknown> = Promise.resolve();
 export function saveReimbursement(record: Reimbursement): Promise<void> {
   const saved: StoredRecord = { ...record, items: record.items.map(({file,preview,recognition,...item}) => ({...item, file:new Blob([file], {type:file.type}), fileName:file.name, fileModified:file.lastModified, preview:preview?.startsWith('data:') ? preview : undefined, recognition: /等待|正在|图片识别中|首次识别/.test(recognition || '') ? '识别未完成，请重新识别' : recognition })) };
-  const summary: RecordSummary = {id:record.id,name:record.name,createdAt:record.createdAt,updatedAt:record.updatedAt,fileCount:record.items.length,activeStep:record.activeStep,...reimbursementStatus(record)};
+  const summary: RecordSummary = {id:record.id,name:record.name,createdAt:record.createdAt,updatedAt:record.updatedAt,fileCount:record.items.length,completionVersion:2,activeStep:record.activeStep,...reimbursementStatus(record)};
   const next = writes.catch(() => undefined).then(async () => {
     const db = await openDatabase(); const tx = db.transaction(['records','summaries'],'readwrite'); const done = finished(tx);
     tx.objectStore('records').put(saved); tx.objectStore('summaries').put(summary); await done;
@@ -42,7 +42,17 @@ export function deleteReimbursement(id: string): Promise<void> {
 }
 export async function listReimbursements(): Promise<RecordSummary[]> {
   await writes.catch(() => undefined); const db = await openDatabase();
-  return new Promise((resolve,reject) => { const tx = db.transaction('summaries','readonly'); const request = tx.objectStore('summaries').getAll(); request.onerror=()=>reject(request.error); request.onsuccess=()=>resolve((request.result as RecordSummary[]).sort((a,b)=>b.updatedAt-a.updatedAt)); });
+  const summaries = await new Promise<RecordSummary[]>((resolve,reject) => { const request = db.transaction('summaries','readonly').objectStore('summaries').getAll(); request.onerror=()=>reject(request.error); request.onsuccess=()=>resolve(request.result); });
+  // Older summaries considered the application optional. Recheck them without changing saved files.
+  const updated = await Promise.all(summaries.map(async summary => {
+    if (summary.completionVersion === 2) return summary;
+    const record = await new Promise<StoredRecord | undefined>((resolve,reject) => {
+      const request = db.transaction('records','readonly').objectStore('records').get(summary.id);
+      request.onerror=()=>reject(request.error); request.onsuccess=()=>resolve(request.result);
+    });
+    return record ? {...summary, ...reimbursementStatus(record as unknown as Reimbursement)} : {...summary,ready:false};
+  }));
+  return updated.sort((a,b)=>b.updatedAt-a.updatedAt);
 }
 export async function loadReimbursement(id: string): Promise<Reimbursement> {
   await writes.catch(() => undefined); const db = await openDatabase();

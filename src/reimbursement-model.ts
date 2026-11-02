@@ -1,4 +1,4 @@
-import { PDFDocument, type PDFImage, type PDFPage } from "pdf-lib";
+import { PDFDocument, PDFDict, PDFName, type PDFImage, type PDFPage } from "pdf-lib";
 import { TripForm, claimTotals } from "./trip-claim";
 export type DocItem = { claimKey?: string; id: string; file: File; title: string; category: string; journey: string; amount: string; preview?: string; recognition?: string };
 export type ManualGroup = { id: string; category: string; name: string };
@@ -37,18 +37,20 @@ export function reimbursementStatus(record: Reimbursement) {
   const accommodation = totalAmount(record.items.filter(x => x.category === '酒店'));
   const transport = totalAmount(record.items.filter(x => TRANSPORT.includes(x.category)));
   const key = JSON.stringify([record.tripForm, transport, accommodation]);
-  const ready = record.ticketsComplete && !record.items.some(x => isInvoice(x) && !x.amount) && record.items.some(x => x.category === '差旅费报销清单' && x.claimKey === key) && record.items.some(x => x.category === '差旅报销审核单');
+  const ready = record.ticketsComplete && !record.items.some(x => isInvoice(x) && !x.amount) && record.items.some(x => x.category === '差旅费报销清单' && x.claimKey === key) && record.items.some(x => x.category === '差旅报销审核单') && record.items.some(x => x.category === APPLICATION);
   return { ready, total: claimTotals(record.tripForm, transport, accommodation).total };
 }
-export async function mergeMaterials(items: DocItem[], requireComplete = false) {
+export async function mergeMaterials(items: DocItem[], requireComplete = true) {
   const out = await PDFDocument.create();
   const skipped: string[] = [];
   const payment = (item: DocItem) => item.title.trim() === "支付截图" && !frontForms.includes(item.category);
-  const useGrid = items.filter(payment).length > 2;
+  const groupKey = (item: DocItem) => JSON.stringify([item.category, item.journey || item.category]);
+  const counts = new Map<string, number>();
+  items.filter(payment).forEach(item => counts.set(groupKey(item), (counts.get(groupKey(item)) || 0) + 1));
   const a4: [number, number] = [595.28, 841.89];
   const margin = 20, gap = 12;
   const cellW = (a4[0] - 2 * margin - gap) / 2, cellH = (a4[1] - 2 * margin - gap) / 2;
-  let sheet: PDFPage | undefined, slots = 0;
+  let sheet: PDFPage | undefined, slots = 0, previousGroup = "";
   function addScreenshot(image: PDFImage) {
     if (!sheet || slots === 4) { sheet = out.addPage(a4); slots = 0; }
     // PDF coordinates start at bottom left; fill cells in reading order.
@@ -61,7 +63,12 @@ export async function mergeMaterials(items: DocItem[], requireComplete = false) 
   for (const item of exportOrder(items)) {
     try {
       const bytes = await item.file.arrayBuffer();
-      const grid = useGrid && payment(item);
+      const key = groupKey(item);
+      const grid = payment(item) && (counts.get(key) || 0) > 2;
+      // A sheet may only contain consecutive screenshots from the same user-created group.
+      // Flush at every intervening invoice/document so the original order never changes.
+      if (!grid || previousGroup !== key) { sheet = undefined; slots = 0; }
+      previousGroup = grid ? key : "";
       if (item.file.type === 'application/pdf' || /\.pdf$/i.test(item.file.name)) {
         if (grid) {
           // Rendering a PDF screenshot respects its crop, rotation and annotations.
@@ -84,6 +91,24 @@ export async function mergeMaterials(items: DocItem[], requireComplete = false) 
           } finally { await task.destroy(); }
         } else {
           const source = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+          // Preserve filled fields when copying audit/application forms into another document.
+          const form = source.getForm();
+          if (form.getFields().length) {
+            const widgets = new Set<string>();
+            source.getPages().forEach(page => {
+              const annots = page.node.Annots();
+              for (let i = 0; annots && i < annots.size(); i++) {
+                const ref = annots.get(i), annot = source.context.lookup(ref);
+                if (annot instanceof PDFDict && annot.get(PDFName.of("Subtype")) === PDFName.of("Widget")) widgets.add(ref.toString());
+              }
+            });
+            form.flatten({ updateFieldAppearances: false });
+            // pdf-lib can leave references to deleted widget children after flattening.
+            source.getPages().forEach(page => {
+              const annots = page.node.Annots();
+              for (let i = (annots?.size() || 0) - 1; i >= 0; i--) if (widgets.has(annots!.get(i).toString())) annots!.remove(i);
+            });
+          }
           const pages = await out.copyPages(source, source.getPageIndices()); pages.forEach(page => out.addPage(page));
         }
       } else {
@@ -95,10 +120,10 @@ export async function mergeMaterials(items: DocItem[], requireComplete = false) 
           page.drawImage(image, { x: (a4[0]-width)/2, y: (a4[1]-height)/2, width, height });
         }
       }
-    } catch { skipped.push(item.file.name); }
+    } catch { skipped.push(item.file.name); sheet = undefined; previousGroup = ""; }
   }
   const pageCount = out.getPageCount();
-  if (requireComplete && skipped.length) throw new Error(`有 ${skipped.length} 份材料无法合并，请进入编辑检查：${skipped.slice(0,2).join('、')}`);
+  if (skipped.length && (requireComplete || items.some(item => frontForms.includes(item.category) && skipped.includes(item.file.name)))) throw new Error(`有 ${skipped.length} 份材料无法合并，请进入编辑检查：${skipped.slice(0,2).join('、')}`);
   if (!pageCount) throw new Error('没有可合并的页面，请检查材料是否损坏或加密');
   return { blob: new Blob([new Uint8Array(await out.save())], {type:'application/pdf'}), pageCount, skipped };
 }

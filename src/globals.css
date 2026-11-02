@@ -213,3 +213,5 @@ footer{text-align:center;color:#9ba4b4;font-size:11px;padding:32px}
 .final-upload-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr));gap:12px;margin:18px 0}
 .final-upload-options button{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:18px;border:1px dashed #bac9e4;border-radius:12px;background:#f6f8ff;color:#3559d8;text-align:left}
 .final-upload-options button:hover:not(:disabled){background:#edf2ff;border-color:#3559d8}.final-upload-options strong{font-size:16px}.final-upload-options small{font-size:14px;color:#66758d}.final-upload-options button:disabled{opacity:.55;cursor:not-allowed}
+
+.final-upload-options .current-final-stage{border:2px solid #3559d8;background:#edf2ff}.final-upload-current{width:100%;padding:20px;border:1.5px dashed #9daed6;border-radius:12px;background:#f7f9ff;color:#3559d8;font-size:16px;margin-bottom:12px}.final-upload-current:disabled{opacity:.5;cursor:not-allowed}

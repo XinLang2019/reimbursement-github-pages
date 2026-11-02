@@ -32,7 +32,7 @@ const REQUIRED_MATERIALS: Record<string, string[]> = {
 const UPLOAD_GUIDE = [
   { category: "", title: "创建类别并上传票据", description: "先创建住宿、飞机、高铁、打车类别，再上传对应材料" },
   { category: "差旅费报销清单", title: "差旅费报销清单", description: "填写出差信息与标准，自动计算补助并生成报销清单" },
-  { category: "差旅报销审核单", title: "差旅报销审核单", description: "上传差旅报销审核单；如有出差申请单，可在此一并添加" },
+  { category: "差旅报销审核单", title: "差旅报销审核单", description: "先上传差旅报销审核单，再上传出差申请单；两项完成后才能导出" },
 ];
 function uploadStepIndex(category: string) { if (category === APPLICATION) return 2; return UPLOAD_GUIDE.findIndex(step => step.category === category); }
 function isTicketCategory(category: string) { return category !== APPLICATION && !UPLOAD_GUIDE.slice(1).some(step => step.category === category); }
@@ -86,11 +86,13 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   const inputRef = useRef<HTMLInputElement>(null);
   const groupCategoryRef = useRef<HTMLSelectElement>(null);
   const guidedCategoryRef = useRef("");
+  const [finalStage, setFinalStage] = useState(initial.items.some(item => item.category === "差旅报销审核单") ? APPLICATION : "差旅报销审核单");
+  const finalUploadRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const input = inputRef.current;
-    const clearCategory = () => { guidedCategoryRef.current = ""; };
-    input?.addEventListener("cancel", clearCategory);
-    return () => input?.removeEventListener("cancel", clearCategory);
+    const cancel = () => { guidedCategoryRef.current = ""; };
+    input?.addEventListener("cancel", cancel);
+    return () => input?.removeEventListener("cancel", cancel);
   }, []);
   const dragDepth = useRef(0);
   const activeGroup = manualGroups.find((group) => group.id === activeGroupId);
@@ -128,7 +130,12 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   }
   const generatedClaim = items.find(item => item.category === "差旅费报销清单" && item.claimKey);
   const claimCurrent = !!generatedClaim && generatedClaim.claimKey === claimKey && ticketsComplete;
-  const guideSteps = UPLOAD_GUIDE.map((step, index) => ({ ...step, complete: index === 0 ? ticketsComplete : index === 1 ? claimCurrent : items.some(item => item.category === step.category) }));
+  const hasAudit = items.some(item => item.category === "差旅报销审核单");
+  const hasApplication = items.some(item => item.category === APPLICATION);
+  useEffect(() => {
+    if (!hasAudit) setFinalStage("差旅报销审核单");
+  }, [hasAudit]);
+  const guideSteps = UPLOAD_GUIDE.map((step, index) => ({ ...step, complete: index === 0 ? ticketsComplete : index === 1 ? claimCurrent : hasAudit && hasApplication }));
   function saveGeneratedClaim(file: File, preview: string) {
     const claim: DocItem = { id: crypto.randomUUID(), file, preview, claimKey, title: "差旅费报销清单", category: "差旅费报销清单", journey: "差旅费报销清单", amount: "" };
     setItems(current => [...current.filter(item => item.category !== "差旅费报销清单"), claim]);
@@ -156,7 +163,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   }
   function chooseFiles() {
     guidedCategoryRef.current = "";
-    if (activeStep > 0) startGuidedUpload(UPLOAD_GUIDE[activeStep].category);
+    if (activeStep > 0) startGuidedUpload(activeStep === 2 ? finalStage : UPLOAD_GUIDE[activeStep].category);
     else inputRef.current?.click();
   }
   function removeItem(item: DocItem) {
@@ -179,8 +186,10 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   function addFiles(files: FileList | File[], targetCategory?: string) {
     if (activeStep === 1) { setNotice("请填写本页信息并生成差旅费报销清单，无需上传文件"); return; }
     if (activeStep === 2 && !claimCurrent) { setNotice("请先在第二步生成最新的差旅费报销清单"); return; }
-    const guidedCategory = targetCategory || guidedCategoryRef.current || UPLOAD_GUIDE[activeStep].category;
+    if (exporting || archiving) return;
+    const guidedCategory = targetCategory || guidedCategoryRef.current || (activeStep === 2 ? finalStage : UPLOAD_GUIDE[activeStep].category);
     guidedCategoryRef.current = "";
+    if (guidedCategory === APPLICATION && !hasAudit) { setNotice("请先上传差旅报销审核单，再上传出差申请单"); return; }
     if (!guidedCategory && !activeGroup) { setNotice("请先创建并选中类别，再上传对应材料"); return; }
     if (guidedCategory && !ticketsComplete) { setNotice("请先完成票据上传并确认金额汇总"); return; }
     const accepted = Array.from(files).filter((file) => ["application/pdf", "image/jpeg", "image/png"].includes(file.type) || /\.(pdf|jpe?g|png)$/i.test(file.name));
@@ -213,6 +222,13 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     }
     setManualGroups((current) => { const next = [...current]; additions.forEach((item) => { const name = item.journey || item.category; if (!next.some((group) => group.category === item.category && group.name === name)) next.push({ id: crypto.randomUUID(), category: item.category, name }); }); return next; });
     setItems((current) => [...current, ...additions]);
+    if (additions.some(item => item.category === "差旅报销审核单")) {
+      setFinalStage(APPLICATION);
+      requestAnimationFrame(() => {
+        finalUploadRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        finalUploadRef.current?.focus({ preventScroll: true });
+      });
+    }
     additions.forEach(item => { void recognizeInvoice(item); });
     if (!guidedCategory) setTicketsComplete(false);
     const hasApproval = additions.some((item) => item.category === "出差审批单");
@@ -220,6 +236,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     else setNotice(accepted.length ? `已加入 ${additions.length} 份材料${guidedCategory ? `，已归入「${guidedCategory}」` : hasApproval ? "，出差审批单已单独归类" : activeGroup ? `，全部归入「${activeGroup.name}」` : batchTransport ? `，支付截图已跟随${batchTransport}材料归类` : "，同类材料已归入对应大类"}` : "暂不支持该文件格式");
   }
   function startGuidedUpload(category: string) {
+    if (category === APPLICATION && !hasAudit) { setNotice("请先上传差旅报销审核单，再上传出差申请单"); return; }
     if (category === "差旅费报销清单") { goToStep(1); return; }
     if ((category === "差旅报销审核单" || category === APPLICATION) && !claimCurrent) { goToStep(1); setNotice("请先填写信息并生成最新的差旅费报销清单"); return; }
     if (category && !ticketsComplete) { setNotice("请先完成票据上传并确认金额汇总"); return; }
@@ -236,6 +253,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       return;
     }
     setActiveStep(uploadStepIndex(category));
+    if (category === APPLICATION || category === "差旅报销审核单") setFinalStage(category);
     guidedCategoryRef.current = category;
     inputRef.current?.click();
   }
@@ -294,6 +312,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     if (recognizing || pendingInvoices) return "请等待金额识别完成，并补齐未识别的发票金额后再导出";
     if (!claimCurrent) return "请返回第二步，根据最新信息和票据金额重新生成清单";
     if (!items.some(x => x.category === "差旅报销审核单")) return "请上传差旅报销审核单后再导出";
+    if (!hasApplication) return "请上传出差申请单后再导出";
     return "";
   }
   async function downloadMaterials() {
@@ -316,7 +335,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     } catch { setNotice("材料打包失败，请重试。未生成不完整的备份包。"); }
     finally { setArchiving(false); }
   }
-  async function buildMergedPdf(requireComplete = false) {
+  async function buildMergedPdf(requireComplete = true) {
     const problem = exportProblem(); if (problem) { setNotice(problem); return; }
     setExporting(true); setNotice("正在合并材料，请稍候…");
     try {
@@ -347,6 +366,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   }
   async function previewPdf() { const blob = await buildMergedPdf(); if (blob) await showPdfPreview(blob); }
   function savePdf(blob: Blob | null = pdfBlob) {
+    const problem = exportProblem(); if (problem) { setNotice(problem); return false; }
     if (!blob) { setNotice("请先生成 PDF"); return false; }
     const filename = `报销材料_${new Date().toISOString().slice(0, 10)}.pdf`;
     try {
@@ -376,6 +396,11 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     const blob = await buildMergedPdf();
     if (blob) savePdf(blob);
   }
+  useEffect(() => {
+    // An edited/replaced audit form must never download an older preview.
+    setPdfUrl(previous => { if (previous) URL.revokeObjectURL(previous); return ""; });
+    setPdfBlob(null); setPdfPages([]); setPreviewError("");
+  }, [fingerprint]);
   function closePreview() { if (pdfUrl) URL.revokeObjectURL(pdfUrl); setPdfUrl(""); setPdfBlob(null); setPdfPages([]); setPreviewError(""); }
 
   return <main onDragEnter={onPageDragEnter} onDragOver={onPageDragOver} onDragLeave={onPageDragLeave} onDrop={onPageDrop}>
@@ -385,7 +410,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     {pageDragging && <div className="page-drop-overlay"><div><span>⇩</span><strong>松开鼠标，添加报销材料</strong><small>整个页面都可以接收 PDF、JPG 和 PNG</small></div></div>}
     <header className="topbar"><div className="brand"><span className="brandmark">票</span><span>报销材料整理助手</span></div><div className="privacy"><span>●</span> 文件仅在本地处理，不会上传服务器</div></header>
     <div className="record-editor-bar"><div><button type="button" className="secondary" disabled={!!recognizing || generatingClaim || exporting || archiving || leaving} onClick={returnToList}>{leaving ? "正在保存…" : "返回报销列表"}</button><strong>{initial.name}</strong></div><div className={saveError ? "local-save-error" : "local-save-status"} role="status">{saveState}{saveError && <button type="button" onClick={() => void persistLatest()}>重试保存</button>}</div></div>
-    <div className="step-layout" inert={leaving || undefined}>
+    <div className="step-layout" inert={leaving || exporting || archiving || undefined}>
       <nav className="step-sidebar" aria-label="报销步骤导航">
         <div className="steps-label">整理进度 <span>{guideCompleted} / 3 已完成</span></div>
         {guideSteps.map((step, index) => <button type="button" key={step.title} className={`step-nav-item ${activeStep === index ? "active" : ""} ${step.complete ? "done" : ""}`} aria-current={activeStep === index ? "step" : undefined} onClick={() => goToStep(index)}><span className="step-nav-number">{step.complete ? "✓" : String(index + 1).padStart(2, "0")}</span><span><strong>{step.title}</strong><small>{activeStep === index ? "当前步骤" : step.complete ? "已完成 · 点击修改" : "待完成"}</small></span></button>)}
@@ -399,11 +424,17 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       {activeStep === 2 && !guideSteps[1].complete && <p className="step-alert">请先在第二步填写信息并生成最新的差旅费报销清单。</p>}
       {activeStep === 0 && <div className="add-category-bar"><label htmlFor="new-category">添加大类</label><select ref={groupCategoryRef} id="new-category" value={newGroupCategory} onChange={(e) => setNewGroupCategory(e.target.value)}>{CATEGORIES.filter(category => !["差旅报销审核单", "差旅费报销清单"].includes(category)).map((category) => <option key={category} value={category}>{category === "酒店" ? "住宿" : category}</option>)}</select><button type="button" onClick={addManualGroup}>确认添加</button><span>住宿、飞机、高铁、打车都可以重复添加</span></div>}
       <input ref={inputRef} type="file" accept=".pdf,.jpg,.jpeg,.png" multiple hidden onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.currentTarget.value = ""; }} />
-      {activeStep === 2 && <div className="final-upload-options">{["差旅报销审核单", APPLICATION].map(category => <button type="button" key={category} disabled={!claimCurrent || exporting || archiving} onClick={() => startGuidedUpload(category)} onDragOver={e => { if (isFileDrag(e)) e.preventDefault(); }} onDrop={e => {
-        if (!isFileDrag(e)) return;
-        e.preventDefault(); e.stopPropagation(); dragDepth.current = 0; setPageDragging(false);
-        addFiles(e.dataTransfer.files, category);
-      }}><strong>＋ 添加{category}</strong><small>{category === APPLICATION ? "选填" : "必填"} · 已添加 {items.filter(item => item.category === category).length} 份</small></button>)}</div>}
+      {activeStep === 2 && <>
+        <div className="final-upload-options" aria-label="最后两项上传进度">
+          {["差旅报销审核单", APPLICATION].map((category, index) => <button type="button" key={category} className={finalStage === category ? "current-final-stage" : ""} aria-current={finalStage === category ? "step" : undefined} disabled={!claimCurrent || (category === APPLICATION && !hasAudit)} onClick={() => setFinalStage(category)} onDragOver={e => { if (isFileDrag(e)) e.preventDefault(); }} onDrop={e => {
+            if (!isFileDrag(e)) return;
+            e.preventDefault(); e.stopPropagation(); dragDepth.current = 0; setPageDragging(false);
+            addFiles(e.dataTransfer.files, category);
+          }}><strong>{index + 1}. {category}</strong><small>必填 · 已添加 {items.filter(item => item.category === category).length} 份{finalStage === category ? " · 当前上传项" : ""}</small></button>)}
+        </div>
+        <button ref={finalUploadRef} type="button" className="final-upload-current" disabled={!claimCurrent} onClick={() => startGuidedUpload(finalStage)}>＋ 上传{finalStage}</button>
+        <p className="trip-help" role="status">{!hasAudit ? "请先上传差旅报销审核单。" : !hasApplication ? "审核单已上传，请继续上传出差申请单。" : "审核单和出差申请单均已上传，可以预览和下载完整材料。"} 点击上方步骤可返回补充或修改。</p>
+      </>}
       {activeStep !== 1 && <div className="toolbar"><div><strong>{activeStep === 0 ? "材料清单" : "已上传文件"}</strong><span>{visibleCount} 份文件{activeStep === 0 ? ` · ${visibleGroups.length} 个类别` : ""}</span></div>{activeStep === 2 && <><button type="button" className="secondary preview-btn" onClick={previewPdf} disabled={!guideSteps[2].complete || !claimCurrent || exporting || archiving}>预览 PDF</button><button type="button" className="primary" onClick={downloadPdf} disabled={!guideSteps[2].complete || !claimCurrent || exporting || archiving}>{exporting ? "正在合并…" : "下载合并 PDF"}</button><button type="button" className="secondary" onClick={downloadMaterials} disabled={!guideSteps[2].complete || !claimCurrent || exporting || archiving}>{archiving ? "正在打包…" : "下载报销材料"}</button></>}</div>}
       {notice && <div className={`notice ${warningNotice ? "warning" : ""}`} role={warningNotice ? "alert" : "status"}>{warningNotice ? "⚠" : "✓"} {notice}</div>}
       {activeStep === 1 ? <TripClaimForm onBusy={setGeneratingClaim} value={tripForm} onChange={setTripForm} transport={transportTotal} accommodation={accommodationTotal} confirmed={ticketsComplete} current={claimCurrent} preview={generatedClaim?.preview} onGenerated={saveGeneratedClaim} onDownload={() => { if (generatedClaim) downloadRenamed(generatedClaim, items.indexOf(generatedClaim)); }} /> : visibleGroups.length ? <div className="list grouped-list">{visibleGroups.map((group, groupIndex) => { const selected = activeGroup?.category === group.category && activeGroup.name === group.journey; const requiredMaterials = REQUIRED_MATERIALS[group.category] || []; const missingMaterials = requiredMaterials.filter((material) => !hasRequiredMaterial(group.docs, material)); return <section className={`material-group ${selected ? "selected-group" : ""}`} key={`${group.category}-${group.journey}`} onDrop={e => {
@@ -427,7 +458,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       </div>}
       {activeStep === 0 && <section className="amount-summary" aria-label="报销金额汇总"><div><span>住宿总金额</span><strong>¥{accommodationTotal.toFixed(2)}</strong></div><div><span>交通总金额（飞机、高铁、打车）</span><strong>¥{transportTotal.toFixed(2)}</strong></div><div><span>合计</span><strong>¥{(accommodationTotal + transportTotal).toFixed(2)}</strong></div><p>仅统计发票金额，支付截图不重复计费。每份发票单独填写金额，多张发票自动相加。{recognizing > 0 ? `正在识别 ${recognizing} 份发票…` : pendingInvoices > 0 ? `还有 ${pendingInvoices} 份发票待填写金额。` : "请核对识别结果。"}</p><button type="button" disabled={!!recognizing || !!pendingInvoices || !items.some(x => REPEATABLE_GROUPS.includes(x.category))} onClick={() => { setTicketsComplete(true); goToStep(1); }}>确认金额，进入第二步</button></section>}
       {activeStep > 0 && <div className="step-page-actions"><button type="button" className="secondary" onClick={() => goToStep(activeStep - 1)}>返回上一步</button>{activeStep === 1 && <button type="button" className="primary" disabled={!ticketsComplete || !guideSteps[1].complete} onClick={() => goToStep(2)}>清单已生成，进入第三步</button>}</div>}
-      {activeStep === 2 && <p className="export-note">PDF 顺序：差旅报销审核单 → 差旅费报销清单 → 出差申请单（如有）→ 其余材料。支付截图超过 2 张时，每页按顺序拼排最多 4 张；ZIP 保留每份原文件及合并 PDF。</p>}
+      {activeStep === 2 && <p className="export-note">PDF 顺序：差旅报销审核单 → 差旅费报销清单 → 出差申请单→ 其余材料按原顺序。每个大类分组内的支付截图超过 2 张时，连续的截图每页最多 4 张，遇到其他材料开始新页；ZIP 保留每份原文件及合并 PDF。</p>}
 
     </section>
     {activeStep === 0 && <aside className="rule-card"><div><span>各类别材料提示</span><strong>上传后自动核对</strong></div><ol><li><b>住</b> 酒店：发票、酒店水单、支付截图</li><li><b>✈</b> 飞机 / 高铁：发票、支付截图</li><li><b>●</b> 打车：发票、行程单、支付截图</li></ol></aside>}
