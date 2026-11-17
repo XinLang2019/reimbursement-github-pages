@@ -1,7 +1,7 @@
 "use client";
 
 import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename, expenseLines, expenseTotals, validateExpenseLines, reimbursementClaimKey } from "./reimbursement-model";
+import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename, expenseLines, expenseTotals, validateExpenseLines, reimbursementClaimKey, moveMaterialToGroup } from "./reimbursement-model";
 import { saveReimbursement, storageMessage } from "./reimbursement-storage";
 import TripClaimForm from "./trip-claim-form";
 import { TripForm } from "./trip-claim";
@@ -69,6 +69,16 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   const [activeStep, setActiveStep] = useState(initial.activeStep);
   const [items, setItems] = useState<DocItem[]>(initial.items);
   const [dragId, setDragId] = useState<string | null>(null);
+  const materialDragRef = useRef("");
+  const [dropGroup, setDropGroup] = useState("");
+  const groupDragKey = (category: string, journey: string) => JSON.stringify([category,journey]);
+  function endMaterialDrag() { materialDragRef.current=""; setDragId(null); setDropGroup(""); }
+  function startMaterialDrag(e: DragEvent<HTMLElement>, id: string) {
+    materialDragRef.current=id; setDragId(id);
+    e.dataTransfer.effectAllowed="move";
+    e.dataTransfer.setData("application/x-reimbursement-material",id);
+    e.dataTransfer.setData("text/plain",id);
+  }
   const [exporting, setExporting] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [pdfUrl, setPdfUrl] = useState("");
@@ -306,6 +316,21 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   function move(fromId: string, toId: string) {
     setItems((current) => { const from = current.findIndex((x) => x.id === fromId); const to = current.findIndex((x) => x.id === toId); if (from < 0 || to < 0 || from === to) return current; const next = [...current]; const [picked] = next.splice(from, 1); next.splice(to, 0, picked); return next; });
   }
+  function dropMaterial(e: DragEvent<HTMLElement>, category: string, journey: string, beforeId?: string) {
+    const id = materialDragRef.current || dragId;
+    if (!id || isFileDrag(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    if (activeStep !== 0) { if (beforeId) move(id,beforeId); endMaterialDrag(); return; }
+    const picked = items.find(item=>item.id===id);
+    const next = moveMaterialToGroup(items,id,category,journey,beforeId);
+    if (next === items || !picked) { endMaterialDrag(); return; }
+    const changedGroup = picked.category !== category || (picked.journey || picked.category) !== journey;
+    setItems(next); setTicketsComplete(false);
+    selectDisplayedGroup(category,journey);
+    const adjusted = manualGroups.some(group => ((group.category === category && group.name === journey) || (group.category === picked.category && group.name === (picked.journey || picked.category))) && !!group.reimbursableAmount?.trim());
+    setNotice(changedGroup ? `已将「${picked.file.name}」移入「${journey}」，请核对日期、地点和金额后重新确认。${adjusted ? '已保留手动填写的报销金额，请重新核对扣减项。' : ''}` : "已调整材料顺序，请重新确认金额。");
+    endMaterialDrag();
+  }
   function isFileDrag(e: DragEvent) { return Array.from(e.dataTransfer.types).includes("Files"); }
   function onPageDragEnter(e: DragEvent<HTMLElement>) { if (!isFileDrag(e)) return; e.preventDefault(); dragDepth.current += 1; setPageDragging(true); }
   function onPageDragOver(e: DragEvent<HTMLElement>) { if (!isFileDrag(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }
@@ -447,7 +472,11 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       {notice && <div className={`notice ${warningNotice ? "warning" : ""}`} role={warningNotice ? "alert" : "status"}>{warningNotice ? "⚠" : "✓"} {notice}</div>}
       {activeStep === 1 ? <TripClaimForm onBusy={setGeneratingClaim} value={tripForm} onChange={setTripForm} lines={expenseRows} transport={transportTotal} accommodation={accommodationTotal} confirmed={ticketsComplete} current={claimCurrent} preview={generatedClaim?.preview} previews={generatedClaim?.claimPreviews} onGenerated={saveGeneratedClaim} onDownload={() => { if (generatedClaim) downloadRenamed(generatedClaim, items.indexOf(generatedClaim)); }} /> : visibleGroups.length ? <div className="list grouped-list">{visibleGroups.map((group, groupIndex) => { const selected = activeGroup?.category === group.category && activeGroup.name === group.journey; const requiredMaterials = REQUIRED_MATERIALS[group.category] || []; const missingMaterials = requiredMaterials.filter((material) => !hasRequiredMaterial(group.docs, material)); const details = manualGroups.find(item => item.category === group.category && item.name === group.journey);
         const expense = expenseRows.find(row => row.category === group.category && row.name === group.journey);
-        return <section className={`material-group ${selected ? "selected-group" : ""}`} key={`${group.category}-${group.journey}`} onDrop={e => {
+        return <section className={`material-group ${selected ? "selected-group" : ""} ${dropGroup === groupDragKey(group.category,group.journey) ? "material-drop-target" : ""}`} key={`${group.category}-${group.journey}`} onDragOver={e => {
+          if (activeStep !== 0 || !materialDragRef.current || isFileDrag(e)) return;
+          e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect="move"; setDropGroup(groupDragKey(group.category,group.journey));
+        }} onDragLeave={e => { if (!(e.relatedTarget instanceof Node) || !e.currentTarget.contains(e.relatedTarget)) setDropGroup(current => current === groupDragKey(group.category,group.journey) ? "" : current); }} onDrop={e => {
+          if (materialDragRef.current && activeStep === 0 && !isFileDrag(e)) { dropMaterial(e,group.category,group.journey); return; }
           if (activeStep !== 2 || !isFileDrag(e)) return;
           e.preventDefault(); e.stopPropagation(); dragDepth.current = 0; setPageDragging(false);
           addFiles(e.dataTransfer.files, group.category);
@@ -459,13 +488,13 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
           <label>地点 / 路线<input maxLength={70} value={details?.location || ''} placeholder={group.category === '酒店' ? '例如：上海·酒店所在地' : '例如：合肥 → 上海'} onChange={e=>updateGroupDetails(group.category,group.journey,{location:e.target.value})}/></label>
         </div>}
         {requiredMaterials.length > 0 && <div className={`material-requirements ${missingMaterials.length ? "incomplete" : "complete"}`}><div className="requirements-header"><strong>{group.category === "酒店" ? "住宿" : group.category}报销需要上传以下 {requiredMaterials.length} 项材料</strong><span>{missingMaterials.length ? `还缺 ${missingMaterials.length} 项：${missingMaterials.join("、")}` : "全部材料已上传 ✓"}</span></div><div className="requirements-list">{requiredMaterials.map((material) => { const uploaded = hasRequiredMaterial(group.docs, material); return <span className={`requirement-item ${uploaded ? "uploaded" : "missing"}`} key={material}><b>{uploaded ? "✓" : "+"}</b>{material}<small>{uploaded ? "已上传" : "待上传"}</small></span>; })}</div></div>}
-        <div className="group-docs">{group.docs.map((item) => { const index = items.findIndex((x) => x.id === item.id); return <article className={`file-row ${dragId === item.id ? "dragging" : ""}`} key={item.id} draggable onDragStart={() => setDragId(item.id)} onDragEnd={() => setDragId(null)} onDragOver={(e) => e.preventDefault()} onDrop={() => dragId && move(dragId, item.id)}>
-        <div className="handle" title="拖动排序">⋮⋮</div><div className={`thumb ${item.preview ? "image" : "pdf"}`}>{item.preview ? <img src={item.preview} alt="材料预览" /> : <><span>PDF</span><b>{index + 1}</b></>}</div>
+        <div className="group-docs">{group.docs.map((item) => { const index = items.findIndex((x) => x.id === item.id); return <article className={`file-row ${dragId === item.id ? "dragging" : ""}`} key={item.id} draggable onDragStart={e => startMaterialDrag(e,item.id)} onDragEnd={endMaterialDrag} onDragOver={e => { if (materialDragRef.current) {e.preventDefault();e.dataTransfer.dropEffect="move";} }} onDrop={e => dropMaterial(e,group.category,group.journey,item.id)}>
+        <div className="handle" title={activeStep === 0 ? "拖动排序，或移入其他大类" : "拖动排序"}>⋮⋮</div><div className={`thumb ${item.preview ? "image" : "pdf"}`}>{item.preview ? <img src={item.preview} alt="材料预览" draggable={false} /> : <><span>PDF</span><b>{index + 1}</b></>}</div>
         <div className="file-main"><div className="auto-label"><span>自动命名</span><button onClick={(e) => { e.stopPropagation(); downloadRenamed(item, index); }}>下载此文件</button></div><div className="generated-name">{formatFilename(item, index, items)}</div><div className="original-name">原文件：{item.file.name}</div></div>
-        <label>材料名称{MATERIAL_OPTIONS[item.category] ? <select aria-label={`${item.file.name}的材料名称`} value={MATERIAL_OPTIONS[item.category].includes(item.title) ? item.title : ""} onChange={(e) => changeMaterial(item, e.target.value)}><option value="" disabled>请选择材料</option>{MATERIAL_OPTIONS[item.category].map(name => <option key={name} value={name}>{name}</option>)}</select> : <input value={item.title} onChange={(e) => update(item.id, { title: e.target.value })} />}</label>
+        <label>材料名称{MATERIAL_OPTIONS[item.category] ? <select aria-label={`${item.file.name}的材料名称`} value={item.title || ""} onChange={(e) => changeMaterial(item, e.target.value)}><option value="" disabled>请选择材料</option>{item.title && !MATERIAL_OPTIONS[item.category].includes(item.title) && <option value={item.title}>{item.title}（移入材料）</option>}{MATERIAL_OPTIONS[item.category].map(name => <option key={name} value={name}>{name}</option>)}</select> : <input value={item.title} onChange={(e) => update(item.id, { title: e.target.value })} />}</label>
         <label className="amount">金额（元）<input inputMode="decimal" placeholder={isInvoice(item) ? "待识别 / 手动填写" : "不计入汇总"} disabled={!isInvoice(item)} value={item.amount} onChange={(e) => { const value = e.target.value; if (/^\d*(?:\.\d{0,2})?$/.test(value)) update(item.id, { amount: value }); }} />{isInvoice(item) && <small>{item.recognition || "请核对发票金额"}<button type="button" disabled={!!recognizing} onClick={() => void recognizeInvoice(item)}>重新识别</button></small>}</label>
         <button className="remove" aria-label="删除文件" onClick={() => removeItem(item)}>×</button>
-      </article>; })}</div><button type="button" className="group-upload-hint" onClick={() => { if (activeStep === 2) startGuidedUpload(group.category); else { selectDisplayedGroup(group.category, group.journey); chooseFiles(); } }}><span aria-hidden="true">＋</span>{activeStep === 0 ? "拖拽材料到页面，或点击上传到此类别" : "拖拽文件到页面，或点击继续上传"}</button></section>; })}</div> : activeStep === 2 ? null : <div className="empty upload-guide" role="button" tabIndex={0} onClick={() => activeStep === 0 ? startGuidedUpload("") : chooseFiles()} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (activeStep === 0) startGuidedUpload(""); else chooseFiles(); } }}>
+      </article>; })}</div><button type="button" className="group-upload-hint" onClick={() => { if (activeStep === 2) startGuidedUpload(group.category); else { selectDisplayedGroup(group.category, group.journey); chooseFiles(); } }}><span aria-hidden="true">＋</span>{activeStep === 0 ? dragId ? "松开材料，移入此大类" : "拖拽材料到其他大类，或点击上传到此类别" : "拖拽文件到页面，或点击继续上传"}</button></section>; })}</div> : activeStep === 2 ? null : <div className="empty upload-guide" role="button" tabIndex={0} onClick={() => activeStep === 0 ? startGuidedUpload("") : chooseFiles()} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (activeStep === 0) startGuidedUpload(""); else chooseFiles(); } }}>
         <span className="upload-guide-icon" aria-hidden="true">⇧</span>
         <h2>{activeStep === 0 ? "先创建报销类别，再上传票据" : `拖拽${UPLOAD_GUIDE[activeStep].title}到这里，或点击上传`}</h2>
         <p>{activeStep === 0 ? "在上方添加住宿、飞机、高铁或打车类别，再拖拽材料到页面，或在类别内点击上传。" : "上传后可在此查看、删除并重新上传文件。"}</p>

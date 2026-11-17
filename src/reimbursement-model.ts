@@ -11,6 +11,16 @@ const frontForms = ["差旅报销审核单", "差旅费报销清单", APPLICATIO
 export function exportOrder(items: DocItem[]) {
   return [...frontForms.flatMap(category => items.filter(item => item.category === category)), ...items.filter(item => !frontForms.includes(item.category))];
 }
+export function moveMaterialToGroup(items: DocItem[], fromId: string, category: string, journey: string, beforeId?: string) {
+  const picked = items.find(item => item.id === fromId);
+  if (!picked || frontForms.includes(picked.category) || frontForms.includes(category) || fromId === beforeId) return items;
+  const next = items.filter(item => item.id !== fromId);
+  const destination = beforeId ? next.findIndex(item => item.id === beforeId && item.category === category && (item.journey || item.category) === journey) : -1;
+  const last = next.reduce((last,item,index) => item.category === category && (item.journey || item.category) === journey ? index : last, -1);
+  const index = destination >= 0 ? destination : last >= 0 ? last+1 : next.length;
+  next.splice(index, 0, {...picked, category, journey});
+  return next;
+}
 export function totalAmount(docs: DocItem[]) { return docs.filter(isInvoice).reduce((sum, item) => sum + Math.round((Number(item.amount) || 0) * 100), 0) / 100; }
 
 export function expenseLines(items: DocItem[], groups: ManualGroup[] = []): ClaimExpenseLine[] {
