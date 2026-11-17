@@ -31,9 +31,12 @@ export function validateTrip(form: TripForm) {
   if (!TRANSPORT_STANDARDS[form.transport]?.includes(form.transportStandard)) return '请选择交通工具和对应标准';
   return '';
 }
+export type ClaimExpenseLine = { category: string; name: string; date: string; endDate: string; location: string; originalAmount: number; amount: number };
+export const CLAIM_ROWS_PER_PAGE = 5;
+export function claimPageCount(lines: ClaimExpenseLine[], other: number) { return Math.max(1, Math.ceil((lines.length + 1 + (other > 0 ? 1 : 0)) / CLAIM_ROWS_PER_PAGE)); }
 export const CLAIM_CANVAS = { width: 2400, height: 1260 };
 // Shared browser / test renderer. All user strings are drawn as text, never HTML.
-export function drawClaim(ctx: CanvasRenderingContext2D, form: TripForm, transport: number, accommodation: number) {
+export function drawClaim(ctx: CanvasRenderingContext2D, form: TripForm, transport: number, accommodation: number, lines?: ClaimExpenseLine[], pageIndex = 0) {
   const totals = claimTotals(form, transport, accommodation);
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, CLAIM_CANVAS.width, CLAIM_CANVAS.height);
   const font = '"ClaimSerif", "Noto Serif CJK SC", "Songti SC", SimSun, serif';
@@ -60,14 +63,33 @@ export function drawClaim(ctx: CanvasRenderingContext2D, form: TripForm, transpo
   const headerY = y+234;
   ['起止日期','出差天数','起止地点'].forEach((label,i)=>cell(xs[i],headerY,widths[i],166,label,'center',false,26));
   cell(xs[3],headerY,xs[7]-xs[3],70,'出差标准'); cell(xs[7],headerY,xs[12]-xs[7],70,'实际报销金额','center',true);
-  ['交通工具','交通工具\n标准','住宿标准\n（每晚）','出差补助标准\n（每天）','交通费','住宿费','出差补助','其他','合计'].forEach((label,i)=>cell(xs[i+3],headerY+70,widths[i+3],96,label));
+  [lines ? '费用类别/\n交通工具' : '交通工具','交通工具\n标准','住宿标准\n（每晚）','出差补助标准\n（每天）','交通费','住宿费','出差补助','其他','合计'].forEach((label,i)=>cell(xs[i+3],headerY+70,widths[i+3],96,label));
   const money = (v: number) => v.toFixed(2);
-  const values = [`${form.startDate}\n至 ${form.endDate}`,String(totals.days),`${form.origin}—${form.destination}`,form.transport,form.transportStandard,money(Number(form.hotelStandard)),money(Number(form.dailyAllowance)),money(transport),money(accommodation),money(totals.allowance),money(totals.other),money(totals.total)];
   const rowY = headerY + 166;
+  let pageAmounts = [transport, accommodation, totals.allowance, totals.other, totals.total];
+  let pageCount = 1;
+  if (lines) {
+    type Row = { values: string[]; amounts: number[] };
+    const rows: Row[] = lines.map(line => {
+      const hotel = line.category === '酒店';
+      const amounts = [hotel ? 0 : line.amount, hotel ? line.amount : 0, 0, 0, line.amount];
+      return { values: [line.endDate && line.endDate !== line.date ? `${line.date}\n至 ${line.endDate}` : line.date, '—', line.location,
+        line.name, hotel ? '—' : line.category === form.transport ? form.transportStandard : '据实报销',
+        hotel ? money(Number(form.hotelStandard)) : '—', '—', ...amounts.map(money)], amounts };
+    });
+    rows.push({ values: [`${form.startDate}\n至 ${form.endDate}`, String(totals.days), `${form.origin}—${form.destination}`, '出差补助', '—', '—', money(Number(form.dailyAllowance)), '0.00','0.00', money(totals.allowance),'0.00', money(totals.allowance)], amounts:[0,0,totals.allowance,0,totals.allowance] });
+    if (totals.other > 0) rows.push({values:['—','—','—','其他费用','—','—','—','0.00','0.00','0.00',money(totals.other),money(totals.other)], amounts:[0,0,0,totals.other,totals.other]});
+    pageCount = claimPageCount(lines, totals.other);
+    const pageRows = rows.slice(pageIndex * CLAIM_ROWS_PER_PAGE, (pageIndex+1) * CLAIM_ROWS_PER_PAGE);
+    for (let row=0; row<CLAIM_ROWS_PER_PAGE; row++) widths.forEach((width,i)=>cell(xs[i],rowY+row*83,width,83,pageRows[row]?.values[i] || '', 'center',i===11,24));
+    if (pageIndex < pageCount-1) pageAmounts = [0,1,2,3,4].map(i=>pageRows.reduce((sum,row)=>sum+Math.round(row.amounts[i]*100),0)/100);
+  } else {
+  const values = [`${form.startDate}\n至 ${form.endDate}`,String(totals.days),`${form.origin}—${form.destination}`,form.transport,form.transportStandard,money(Number(form.hotelStandard)),money(Number(form.dailyAllowance)),money(transport),money(accommodation),money(totals.allowance),money(totals.other),money(totals.total)];
   values.forEach((value,i)=>cell(xs[i],rowY,widths[i],160,value,'center',i===11,28));
   for (let row=1;row<=3;row++) widths.forEach((width,i)=>cell(xs[i],rowY+160+(row-1)*85,width,85,''));
+  }
   const totalY = rowY+415;
-  cell(x,totalY,xs[7]-x,100,'报销金额合计','center',true,34);
-  [transport,accommodation,totals.allowance,totals.other,totals.total].forEach((value,i)=>cell(xs[i+7],totalY,widths[i+7],100,money(value),'center',i===4,30));
-  ctx.font = `24px ${font}`; ctx.textAlign = 'left'; ctx.fillText('金额单位：元；出差天数含出发日和返程日。',x,1175);
+  cell(x,totalY,xs[7]-x,100,pageIndex < pageCount-1 ? '本页小计（续下页）' : '报销金额合计','center',true,34);
+  pageAmounts.forEach((value,i)=>cell(xs[i+7],totalY,widths[i+7],100,money(value),'center',i===4,30));
+  ctx.font = `24px ${font}`; ctx.textAlign = 'left'; ctx.fillText(`金额单位：元；出差补助按整次出差起止日期计算，含出发日和返程日。    第 ${pageIndex+1} / ${pageCount} 页`,x,1175);
 }

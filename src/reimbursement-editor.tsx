@@ -1,7 +1,7 @@
 "use client";
 
 import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename } from "./reimbursement-model";
+import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename, expenseLines, expenseTotals, validateExpenseLines, reimbursementClaimKey } from "./reimbursement-model";
 import { saveReimbursement, storageMessage } from "./reimbursement-storage";
 import TripClaimForm from "./trip-claim-form";
 import { TripForm } from "./trip-claim";
@@ -98,10 +98,10 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   const activeGroup = manualGroups.find((group) => group.id === activeGroupId);
   const [ticketsComplete, setTicketsComplete] = useState(initial.ticketsComplete);
   const [recognizing, setRecognizing] = useState(0);
-  const accommodationTotal = totalAmount(items.filter(x => x.category === "酒店"));
-  const transportTotal = totalAmount(items.filter(x => TRANSPORT.includes(x.category)));
+  const expenseRows = expenseLines(items, manualGroups);
+  const {accommodation: accommodationTotal, transport: transportTotal} = expenseTotals(expenseRows);
   const [tripForm, setTripForm] = useState<TripForm>(initial.tripForm);
-  const claimKey = JSON.stringify([tripForm, transportTotal, accommodationTotal]);
+  const claimKey = reimbursementClaimKey(tripForm, expenseRows);
   const [saveState, setSaveState] = useState("已保存到本地");
   const [saveError, setSaveError] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -113,7 +113,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   const imageUrls = useRef(new Set<string>());
   items.forEach(item => { if (item.preview?.startsWith("blob:")) imageUrls.current.add(item.preview); });
   useEffect(() => () => { imageUrls.current.forEach(url => URL.revokeObjectURL(url)); }, []);
-  const fingerprint = JSON.stringify([items.map(({ recognition, preview, file, ...item }) => [item, file.name, file.size, file.lastModified]), manualGroups, tripForm, activeStep, activeGroupId, newGroupCategory, ticketsComplete]);
+  const fingerprint = JSON.stringify([items.map(({ recognition, preview, claimPreviews, file, ...item }) => [item, file.name, file.size, file.lastModified]), manualGroups, tripForm, activeStep, activeGroupId, newGroupCategory, ticketsComplete]);
   async function persistLatest() {
     const version = ++saveVersion.current; setSaveState("正在保存…"); setSaveError(false);
     try { await saveReimbursement(latestSnapshot.current); if (version === saveVersion.current) setSaveState("已保存到本地"); return true; }
@@ -136,15 +136,15 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     if (!hasAudit) setFinalStage("差旅报销审核单");
   }, [hasAudit]);
   const guideSteps = UPLOAD_GUIDE.map((step, index) => ({ ...step, complete: index === 0 ? ticketsComplete : index === 1 ? claimCurrent : hasAudit && hasApplication }));
-  function saveGeneratedClaim(file: File, preview: string) {
-    const claim: DocItem = { id: crypto.randomUUID(), file, preview, claimKey, title: "差旅费报销清单", category: "差旅费报销清单", journey: "差旅费报销清单", amount: "" };
+  function saveGeneratedClaim(file: File, preview: string, claimPreviews?: string[]) {
+    const claim: DocItem = { id: crypto.randomUUID(), file, preview, claimPreviews, claimKey, title: "差旅费报销清单", category: "差旅费报销清单", journey: "差旅费报销清单", amount: "" };
     setItems(current => [...current.filter(item => item.category !== "差旅费报销清单"), claim]);
     setNotice("差旅费报销清单已生成，已自动加入合并材料");
   }
 
   const pendingInvoices = items.filter(x => isInvoice(x) && !x.amount).length;
   const guideCompleted = guideSteps.filter((step) => step.complete).length;
-  const warningNotice = notice.startsWith("请先") || notice.includes("暂未添加");
+  const warningNotice = notice.startsWith("请") || notice.includes("暂未添加");
   const groupedItems = useMemo(() => {
     const result: { category: string; journey: string; docs: DocItem[] }[] = manualGroups.map((group) => ({ category: group.category, journey: group.name, docs: [] }));
     items.forEach((item) => { const journey = item.journey || item.category; const found = result.find((group) => group.category === item.category && group.journey === journey); if (found) found.docs.push(item); else result.push({ category: item.category, journey, docs: [item] }); });
@@ -290,6 +290,14 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     setManualGroups((current) => current.filter((group) => !(group.category === category && group.name === journey))); setItems((current) => current.filter((item) => !(item.category === category && (item.journey || item.category) === journey))); if (target?.id === activeGroupId) setActiveGroupId(""); setNotice(`已删除「${journey || category}」大类`); setDeleteTarget(null);
   }
   function update(id: string, patch: Partial<DocItem>) { if (items.some(item => item.id === id && isTicketCategory(item.category))) setTicketsComplete(false); setItems((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item)); }
+  function updateGroupDetails(category: string, journey: string, patch: Partial<ManualGroup>) {
+    setTicketsComplete(false);
+    setManualGroups(current => {
+      const found = current.some(group => group.category === category && group.name === journey);
+      return found ? current.map(group => group.category === category && group.name === journey ? {...group,...patch} : group)
+        : [...current,{id:crypto.randomUUID(),category,name:journey,...patch}];
+    });
+  }
   function changeMaterial(item: DocItem, title: string) {
     const next = { ...item, title };
     update(item.id, { title, ...(!isInvoice(next) ? { amount: "", recognition: undefined } : {}) });
@@ -437,12 +445,19 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       </>}
       {activeStep !== 1 && <div className="toolbar"><div><strong>{activeStep === 0 ? "材料清单" : "已上传文件"}</strong><span>{visibleCount} 份文件{activeStep === 0 ? ` · ${visibleGroups.length} 个类别` : ""}</span></div>{activeStep === 2 && <><button type="button" className="secondary preview-btn" onClick={previewPdf} disabled={!guideSteps[2].complete || !claimCurrent || exporting || archiving}>预览 PDF</button><button type="button" className="primary" onClick={downloadPdf} disabled={!guideSteps[2].complete || !claimCurrent || exporting || archiving}>{exporting ? "正在合并…" : "下载合并 PDF"}</button><button type="button" className="secondary" onClick={downloadMaterials} disabled={!guideSteps[2].complete || !claimCurrent || exporting || archiving}>{archiving ? "正在打包…" : "下载报销材料"}</button></>}</div>}
       {notice && <div className={`notice ${warningNotice ? "warning" : ""}`} role={warningNotice ? "alert" : "status"}>{warningNotice ? "⚠" : "✓"} {notice}</div>}
-      {activeStep === 1 ? <TripClaimForm onBusy={setGeneratingClaim} value={tripForm} onChange={setTripForm} transport={transportTotal} accommodation={accommodationTotal} confirmed={ticketsComplete} current={claimCurrent} preview={generatedClaim?.preview} onGenerated={saveGeneratedClaim} onDownload={() => { if (generatedClaim) downloadRenamed(generatedClaim, items.indexOf(generatedClaim)); }} /> : visibleGroups.length ? <div className="list grouped-list">{visibleGroups.map((group, groupIndex) => { const selected = activeGroup?.category === group.category && activeGroup.name === group.journey; const requiredMaterials = REQUIRED_MATERIALS[group.category] || []; const missingMaterials = requiredMaterials.filter((material) => !hasRequiredMaterial(group.docs, material)); return <section className={`material-group ${selected ? "selected-group" : ""}`} key={`${group.category}-${group.journey}`} onDrop={e => {
+      {activeStep === 1 ? <TripClaimForm onBusy={setGeneratingClaim} value={tripForm} onChange={setTripForm} lines={expenseRows} transport={transportTotal} accommodation={accommodationTotal} confirmed={ticketsComplete} current={claimCurrent} preview={generatedClaim?.preview} previews={generatedClaim?.claimPreviews} onGenerated={saveGeneratedClaim} onDownload={() => { if (generatedClaim) downloadRenamed(generatedClaim, items.indexOf(generatedClaim)); }} /> : visibleGroups.length ? <div className="list grouped-list">{visibleGroups.map((group, groupIndex) => { const selected = activeGroup?.category === group.category && activeGroup.name === group.journey; const requiredMaterials = REQUIRED_MATERIALS[group.category] || []; const missingMaterials = requiredMaterials.filter((material) => !hasRequiredMaterial(group.docs, material)); const details = manualGroups.find(item => item.category === group.category && item.name === group.journey);
+        const expense = expenseRows.find(row => row.category === group.category && row.name === group.journey);
+        return <section className={`material-group ${selected ? "selected-group" : ""}`} key={`${group.category}-${group.journey}`} onDrop={e => {
           if (activeStep !== 2 || !isFileDrag(e)) return;
           e.preventDefault(); e.stopPropagation(); dragDepth.current = 0; setPageDragging(false);
           addFiles(e.dataTransfer.files, group.category);
         }}>
-        <div className={`group-heading ${TRANSPORT.includes(group.category) ? "transport" : ""}`} onClick={() => selectDisplayedGroup(group.category, group.journey)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && selectDisplayedGroup(group.category, group.journey)}><span className="group-no">{String(groupIndex + 1).padStart(2, "0")}</span><div><small>{activeStep > 0 ? "本步骤材料" : selected ? "已选中 · 新材料将进入此类" : TRANSPORT.includes(group.category) ? "交通材料 / 点击选中" : group.category === "酒店" ? "住宿材料 / 点击选中" : "报销材料 / 点击选中"}</small><strong>{group.journey && group.journey !== group.category ? group.journey : group.category}</strong></div><em>{group.docs.length} 份{REPEATABLE_GROUPS.includes(group.category) && ` · ¥${totalAmount(group.docs).toFixed(2)}`}</em><button type="button" className="delete-group" aria-label="删除大类" onClick={(e) => { e.stopPropagation(); deleteGroup(group.category, group.journey, group.docs.length); }}>删除</button></div>
+        <div className={`group-heading ${TRANSPORT.includes(group.category) ? "transport" : ""}`} onClick={() => selectDisplayedGroup(group.category, group.journey)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && selectDisplayedGroup(group.category, group.journey)}><span className="group-no">{String(groupIndex + 1).padStart(2, "0")}</span><div><small>{activeStep > 0 ? "本步骤材料" : selected ? "已选中 · 新材料将进入此类" : TRANSPORT.includes(group.category) ? "交通材料 / 点击选中" : group.category === "酒店" ? "住宿材料 / 点击选中" : "报销材料 / 点击选中"}</small><strong>{group.journey && group.journey !== group.category ? group.journey : group.category}</strong></div><em>{group.docs.length} 份</em>{REPEATABLE_GROUPS.includes(group.category) && <div className="group-amount-edit" onClick={e=>e.stopPropagation()} onKeyDown={e=>e.stopPropagation()}><label>报销金额（元）<input aria-label={`${group.journey}报销金额`} inputMode="decimal" value={details?.reimbursableAmount ?? ''} placeholder={(expense?.originalAmount || 0).toFixed(2)} onChange={e=>{if (/^\d*(?:\.\d{0,2})?$/.test(e.target.value)) updateGroupDetails(group.category,group.journey,{reimbursableAmount:e.target.value});}} /></label><small>发票合计 ¥{(expense?.originalAmount || 0).toFixed(2)} · 留空自动汇总</small>{details?.reimbursableAmount && <button type="button" onClick={()=>updateGroupDetails(group.category,group.journey,{reimbursableAmount:''})}>恢复发票合计</button>}</div>}<button type="button" className="delete-group" aria-label="删除大类" onClick={(e) => { e.stopPropagation(); deleteGroup(group.category, group.journey, group.docs.length); }}>删除</button></div>
+        {activeStep === 0 && REPEATABLE_GROUPS.includes(group.category) && <div className="group-event-fields" aria-label={`${group.journey}发生信息`}>
+          <label>发生日期<input type="date" value={details?.occurredOn || ''} onChange={e=>updateGroupDetails(group.category,group.journey,{occurredOn:e.target.value})}/></label>
+          <label>结束日期（选填）<input type="date" min={details?.occurredOn || undefined} value={details?.endDate || ''} onChange={e=>updateGroupDetails(group.category,group.journey,{endDate:e.target.value})}/></label>
+          <label>地点 / 路线<input maxLength={70} value={details?.location || ''} placeholder={group.category === '酒店' ? '例如：上海·酒店所在地' : '例如：合肥 → 上海'} onChange={e=>updateGroupDetails(group.category,group.journey,{location:e.target.value})}/></label>
+        </div>}
         {requiredMaterials.length > 0 && <div className={`material-requirements ${missingMaterials.length ? "incomplete" : "complete"}`}><div className="requirements-header"><strong>{group.category === "酒店" ? "住宿" : group.category}报销需要上传以下 {requiredMaterials.length} 项材料</strong><span>{missingMaterials.length ? `还缺 ${missingMaterials.length} 项：${missingMaterials.join("、")}` : "全部材料已上传 ✓"}</span></div><div className="requirements-list">{requiredMaterials.map((material) => { const uploaded = hasRequiredMaterial(group.docs, material); return <span className={`requirement-item ${uploaded ? "uploaded" : "missing"}`} key={material}><b>{uploaded ? "✓" : "+"}</b>{material}<small>{uploaded ? "已上传" : "待上传"}</small></span>; })}</div></div>}
         <div className="group-docs">{group.docs.map((item) => { const index = items.findIndex((x) => x.id === item.id); return <article className={`file-row ${dragId === item.id ? "dragging" : ""}`} key={item.id} draggable onDragStart={() => setDragId(item.id)} onDragEnd={() => setDragId(null)} onDragOver={(e) => e.preventDefault()} onDrop={() => dragId && move(dragId, item.id)}>
         <div className="handle" title="拖动排序">⋮⋮</div><div className={`thumb ${item.preview ? "image" : "pdf"}`}>{item.preview ? <img src={item.preview} alt="材料预览" /> : <><span>PDF</span><b>{index + 1}</b></>}</div>
@@ -456,7 +471,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
         <p>{activeStep === 0 ? "在上方添加住宿、飞机、高铁或打车类别，再拖拽材料到页面，或在类别内点击上传。" : "上传后可在此查看、删除并重新上传文件。"}</p>
         <small>支持 PDF、JPG、PNG，可一次添加多份</small>
       </div>}
-      {activeStep === 0 && <section className="amount-summary" aria-label="报销金额汇总"><div><span>住宿总金额</span><strong>¥{accommodationTotal.toFixed(2)}</strong></div><div><span>交通总金额（飞机、高铁、打车）</span><strong>¥{transportTotal.toFixed(2)}</strong></div><div><span>合计</span><strong>¥{(accommodationTotal + transportTotal).toFixed(2)}</strong></div><p>仅统计发票金额，支付截图不重复计费。每份发票单独填写金额，多张发票自动相加。{recognizing > 0 ? `正在识别 ${recognizing} 份发票…` : pendingInvoices > 0 ? `还有 ${pendingInvoices} 份发票待填写金额。` : "请核对识别结果。"}</p><button type="button" disabled={!!recognizing || !!pendingInvoices || !items.some(x => REPEATABLE_GROUPS.includes(x.category))} onClick={() => { setTicketsComplete(true); goToStep(1); }}>确认金额，进入第二步</button></section>}
+      {activeStep === 0 && <section className="amount-summary" aria-label="报销金额汇总"><div><span>住宿总金额</span><strong>¥{accommodationTotal.toFixed(2)}</strong></div><div><span>交通总金额（飞机、高铁、打车）</span><strong>¥{transportTotal.toFixed(2)}</strong></div><div><span>合计</span><strong>¥{(accommodationTotal + transportTotal).toFixed(2)}</strong></div><p>按每个大类的报销金额汇总，支付截图不重复计费。报销金额留空时使用发票合计，可扣除不可报销费用。请填写各组日期和地点；补助仍按整次出差的起止日期计算。{recognizing > 0 ? `正在识别 ${recognizing} 份发票…` : pendingInvoices > 0 ? `还有 ${pendingInvoices} 份发票待填写金额。` : "请核对识别结果。"}</p><button type="button" disabled={!!recognizing || !!pendingInvoices || !items.some(x => REPEATABLE_GROUPS.includes(x.category))} onClick={() => { const error = validateExpenseLines(expenseRows); if(error) {setNotice("请检查：" + error);return;} setTicketsComplete(true); goToStep(1); }}>确认金额，进入第二步</button></section>}
       {activeStep > 0 && <div className="step-page-actions"><button type="button" className="secondary" onClick={() => goToStep(activeStep - 1)}>返回上一步</button>{activeStep === 1 && <button type="button" className="primary" disabled={!ticketsComplete || !guideSteps[1].complete} onClick={() => goToStep(2)}>清单已生成，进入第三步</button>}</div>}
       {activeStep === 2 && <p className="export-note">PDF 顺序：差旅报销审核单 → 差旅费报销清单 → 出差申请单→ 其余材料按原顺序。每个大类分组内的支付截图超过 2 张时，连续的截图每页最多 4 张，遇到其他材料开始新页；ZIP 保留每份原文件及合并 PDF。</p>}
 

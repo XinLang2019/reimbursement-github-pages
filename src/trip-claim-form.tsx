@@ -1,8 +1,9 @@
 'use client';
 import { FormEvent, useState } from 'react';
 import { withTimeout } from './invoice-recognition';
+import { validateExpenseLines } from './reimbursement-model';
 import { PDFDocument } from 'pdf-lib';
-import { CLAIM_CANVAS, TRANSPORT_STANDARDS, TripForm, claimTotals, drawClaim, validateTrip } from './trip-claim';
+import { CLAIM_CANVAS, TRANSPORT_STANDARDS, TripForm, ClaimExpenseLine, claimPageCount, claimTotals, drawClaim, validateTrip } from './trip-claim';
 
 const DEPARTMENT = '软件系统研发部';
 const COMPANIES = [
@@ -12,30 +13,37 @@ const COMPANIES = [
   '安徽七腾机器人有限公司', '重庆七腾文化创意有限公司', '七腾机器人（山东）有限公司',
 ];
 
-type Props = { value: TripForm; onChange: (value: TripForm) => void; transport: number; accommodation: number; confirmed: boolean; current: boolean; preview?: string; onGenerated: (file: File, preview: string) => void; onDownload: () => void; onBusy?: (busy: boolean) => void; };
-export default function TripClaimForm({ value, onChange, transport, accommodation, confirmed, current, preview, onGenerated, onDownload, onBusy }: Props) {
+type Props = { lines: ClaimExpenseLine[]; previews?: string[]; value: TripForm; onChange: (value: TripForm) => void; transport: number; accommodation: number; confirmed: boolean; current: boolean; preview?: string; onGenerated: (file: File, preview: string, previews?: string[]) => void; onDownload: () => void; onBusy?: (busy: boolean) => void; };
+export default function TripClaimForm({ lines, previews, value, onChange, transport, accommodation, confirmed, current, preview, onGenerated, onDownload, onBusy }: Props) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const [customDepartment, setCustomDepartment] = useState(!!value.department && value.department !== DEPARTMENT);
   const totals = claimTotals(value, transport, accommodation);
   const update = (key: keyof TripForm, text: string) => { setError(''); onChange({ ...value, [key]: text }); };
   async function generate(e: FormEvent) {
     e.preventDefault(); const validation = validateTrip(value); if (validation) { setError(validation); return; }
+    const lineError = validateExpenseLines(lines); if (lineError) { setError(lineError); return; }
     if (!confirmed) { setError('请先返回第一步确认票据金额'); return; }
     setBusy(true); onBusy?.(true); setError('');
     try {
       const base = ((import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL || '/').replace(/\/?$/, '/');
       if (!Array.from(document.fonts).some(font => font.family === 'ClaimSerif' && font.status === 'loaded')) { const font = new FontFace('ClaimSerif', `url(${base}fonts/claim-serif.woff)`); await withTimeout(font.load(), 30000); document.fonts.add(font); }
       await document.fonts.ready;
-      const canvas = document.createElement('canvas'); canvas.width = CLAIM_CANVAS.width; canvas.height = CLAIM_CANVAS.height;
-      const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('无法生成清单图片，请重试');
-      drawClaim(ctx, value, transport, accommodation);
-      const image = canvas.toDataURL('image/png'); const pdf = await PDFDocument.create();
-      const embedded = await pdf.embedPng(image); const page = pdf.addPage([841.89, 595.28]);
-      const width = 809.89, height = width * canvas.height / canvas.width;
-      page.drawImage(embedded, { x: 16, y: (595.28-height)/2, width, height });
+      const pdf = await PDFDocument.create();
+      const pages: string[] = [];
+      for (let index=0; index<claimPageCount(lines, totals.other); index++) {
+        const canvas = document.createElement('canvas'); canvas.width = CLAIM_CANVAS.width; canvas.height = CLAIM_CANVAS.height;
+        try {
+          const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('无法生成清单图片，请重试');
+          drawClaim(ctx, value, transport, accommodation, lines, index);
+          const image = canvas.toDataURL('image/png'); pages.push(image);
+          const embedded = await pdf.embedPng(image); const page = pdf.addPage([841.89, 595.28]);
+          const width = 809.89, height = width * canvas.height / canvas.width;
+          page.drawImage(embedded, { x: 16, y: (595.28-height)/2, width, height });
+        } finally { canvas.width = 0; canvas.height = 0; }
+      }
       pdf.setTitle('差旅费报销清单');
       const file = new File([new Uint8Array(await pdf.save())], '2_差旅费报销清单.pdf', { type: 'application/pdf' });
-      onGenerated(file, image); canvas.width = 0; canvas.height = 0;
+      onGenerated(file, pages[0], pages);
     } catch (err) { setError(err instanceof Error ? err.message : '清单生成失败，请重试'); }
     finally { setBusy(false); onBusy?.(false); }
   }
@@ -57,14 +65,14 @@ export default function TripClaimForm({ value, onChange, transport, accommodatio
       {field('dailyAllowance','出差补助标准（元 / 天）',{required:true,type:'number',placeholder:'无补助请填 0'})}
       {field('otherExpense','其他费用（元）',{required:true,type:'number'})}
     </div></fieldset>
-    <section className="claim-calculation" aria-label="实际报销金额"><h2>实际报销金额</h2><div className="claim-totals-grid">
+    <section className="claim-calculation" aria-label="实际报销金额"><h2>实际报销金额</h2><div className="claim-detail-wrap"><table className="claim-detail-table"><thead><tr><th>大类分组</th><th>发生日期</th><th>地点 / 路线</th><th>发票合计</th><th>报销金额</th></tr></thead><tbody>{lines.map(line=><tr key={JSON.stringify([line.category,line.name])}><td>{line.name}</td><td>{line.date}{line.endDate && line.endDate !== line.date ? ` 至 ${line.endDate}` : ''}</td><td>{line.location}</td><td>¥{line.originalAmount.toFixed(2)}</td><td>¥{line.amount.toFixed(2)}</td></tr>)}</tbody></table></div><div className="claim-totals-grid">
       <div><span>交通费</span><strong>¥{transport.toFixed(2)}</strong><small>来自第一步</small></div><div><span>住宿费</span><strong>¥{accommodation.toFixed(2)}</strong><small>来自第一步</small></div>
       <div><span>出差补助</span><strong>¥{totals.allowance.toFixed(2)}</strong><small>{totals.days} 天 × ¥{(Number(value.dailyAllowance)||0).toFixed(2)} / 天</small></div>
       <div><span>其他费用</span><strong>¥{totals.other.toFixed(2)}</strong></div><div className="claim-total"><span>报销金额合计</span><strong>¥{totals.total.toFixed(2)}</strong></div>
-    </div><p className="trip-help">住宿费按发票汇总，住宿标准仅作为表格中的标准说明。</p></section>
+    </div><p className="trip-help">交通费、住宿费采用第一步中各组调整后的报销金额；补助仅按整次出差天数计算一次。住宿标准仅作说明。</p></section>
     {error && <p role="alert" className="step-alert">{error}</p>}
     {preview && !current && <p role="status" className="step-alert">信息或票据金额已修改，请重新生成清单后再进入第三步。</p>}
-    <div className="claim-generate-actions"><button type="submit" className="primary" disabled={busy || !confirmed}>{busy ? '正在生成清单…' : preview ? '信息填写完成，重新生成清单' : '信息填写完成，生成清单'}</button><span>生成横向 A4 PDF，自动加入合并材料。</span></div>
-    {current && preview && <section className="claim-preview"><header><div><strong>差旅费报销清单已生成</strong><p>合并时自动排在审核单之后。</p></div><button type="button" className="secondary" onClick={onDownload}>下载清单 PDF</button></header><img src={preview} alt="已生成的差旅费报销清单，含出差信息、出差标准及实际报销金额" /></section>}
+    <div className="claim-generate-actions"><button type="submit" className="primary" disabled={busy || !confirmed}>{busy ? '正在生成清单…' : preview ? '信息填写完成，重新生成清单' : '信息填写完成，生成清单'}</button><span>按大类逐行生成横向 A4 PDF，明细较多时自动分页，最后汇总。</span></div>
+    {current && preview && <section className="claim-preview"><header><div><strong>差旅费报销清单已生成</strong><p>合并时自动排在审核单之后。</p></div><button type="button" className="secondary" onClick={onDownload}>下载清单 PDF</button></header>{(previews?.length ? previews : [preview]).map((image,index)=><img key={index} src={image} alt={`差旅费报销清单第 ${index+1} 页，含各大类明细和报销金额`} />)}</section>}
   </form>;
 }

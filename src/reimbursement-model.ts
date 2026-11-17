@@ -1,7 +1,7 @@
 import { PDFDocument, PDFDict, PDFName, type PDFImage, type PDFPage } from "pdf-lib";
-import { TripForm, claimTotals } from "./trip-claim";
-export type DocItem = { claimKey?: string; id: string; file: File; title: string; category: string; journey: string; amount: string; preview?: string; recognition?: string };
-export type ManualGroup = { id: string; category: string; name: string };
+import { TripForm, ClaimExpenseLine, claimTotals, tripDays } from "./trip-claim";
+export type DocItem = { claimKey?: string; id: string; file: File; title: string; category: string; journey: string; amount: string; preview?: string; claimPreviews?: string[]; recognition?: string };
+export type ManualGroup = { id: string; category: string; name: string; occurredOn?: string; endDate?: string; location?: string; reimbursableAmount?: string };
 const CATEGORY_PREFIX: Record<string, number> = { 差旅报销审核单: 1, 差旅费报销清单: 2, 出差申请单: 3, 出差审批单: 3, 酒店: 4, 飞机: 5, 高铁: 6, 打车: 7, 其他: 9 };
 const TRANSPORT = ["飞机", "高铁", "打车"];
 const REPEATABLE_GROUPS = ["酒店", ...TRANSPORT];
@@ -12,6 +12,39 @@ export function exportOrder(items: DocItem[]) {
   return [...frontForms.flatMap(category => items.filter(item => item.category === category)), ...items.filter(item => !frontForms.includes(item.category))];
 }
 export function totalAmount(docs: DocItem[]) { return docs.filter(isInvoice).reduce((sum, item) => sum + Math.round((Number(item.amount) || 0) * 100), 0) / 100; }
+
+export function expenseLines(items: DocItem[], groups: ManualGroup[] = []): ClaimExpenseLine[] {
+  const result: ClaimExpenseLine[] = [];
+  for (const item of items.filter(item => REPEATABLE_GROUPS.includes(item.category))) {
+    const name = item.journey || item.category;
+    if (result.some(row => row.category === item.category && row.name === name)) continue;
+    const group = groups.find(group => group.category === item.category && group.name === name);
+    const originalAmount = totalAmount(items.filter(doc => doc.category === item.category && (doc.journey || doc.category) === name));
+    result.push({ category: item.category, name, date: group?.occurredOn || '', endDate: group?.endDate || '', location: group?.location || '', originalAmount,
+      amount: group?.reimbursableAmount?.trim() ? Number(group.reimbursableAmount) : originalAmount });
+  }
+  // Keep the order displayed in the upload workspace, including repeated categories.
+  return result.sort((a,b) => {
+    const index = (line: ClaimExpenseLine) => { const i = groups.findIndex(g => g.category === line.category && g.name === line.name); return i < 0 ? groups.length : i; };
+    return index(a)-index(b);
+  });
+}
+export function expenseTotals(lines: ClaimExpenseLine[]) {
+  const sum = (hotel: boolean) => lines.filter(row => (row.category === '酒店') === hotel).reduce((sum,row) => sum + Math.round((Number.isFinite(row.amount) ? row.amount : 0)*100),0)/100;
+  return { accommodation: sum(true), transport: sum(false) };
+}
+export function validateExpenseLines(lines: ClaimExpenseLine[]) {
+  if (!lines.length) return '请先上传住宿或交通票据';
+  for (const row of lines) {
+    if (!tripDays(row.date, row.endDate || row.date)) return `请填写「${row.name}」的有效发生日期，结束日期不能早于开始日期`;
+    if (!row.location.trim()) return `请填写「${row.name}」的地点或路线`;
+    if (!Number.isFinite(row.amount) || row.amount < 0 || Math.round(row.amount*100) > Math.round(row.originalAmount*100)) return `「${row.name}」的报销金额应在 0 至发票总额之间`;
+  }
+  return '';
+}
+export function reimbursementClaimKey(form: TripForm, lines: ClaimExpenseLine[]) {
+  return JSON.stringify(['group-details-v1', form, lines]);
+}
 
 function extOf(file: File) { const ext = file.name.split(".").pop()?.toLowerCase(); return ext === "jpeg" ? "jpg" : ext || "pdf"; }
 export function formatFilename(item: DocItem, index: number, items: DocItem[]) {
@@ -34,10 +67,10 @@ export type Reimbursement = {
   activeStep: number; activeGroupId: string; newGroupCategory: string; ticketsComplete: boolean;
 };
 export function reimbursementStatus(record: Reimbursement) {
-  const accommodation = totalAmount(record.items.filter(x => x.category === '酒店'));
-  const transport = totalAmount(record.items.filter(x => TRANSPORT.includes(x.category)));
-  const key = JSON.stringify([record.tripForm, transport, accommodation]);
-  const ready = record.ticketsComplete && !record.items.some(x => isInvoice(x) && !x.amount) && record.items.some(x => x.category === '差旅费报销清单' && x.claimKey === key) && record.items.some(x => x.category === '差旅报销审核单') && record.items.some(x => x.category === APPLICATION);
+  const lines = expenseLines(record.items, record.manualGroups);
+  const {accommodation, transport} = expenseTotals(lines);
+  const key = reimbursementClaimKey(record.tripForm, lines);
+  const ready = record.ticketsComplete && !validateExpenseLines(lines) && !record.items.some(x => isInvoice(x) && !x.amount) && record.items.some(x => x.category === '差旅费报销清单' && x.claimKey === key) && record.items.some(x => x.category === '差旅报销审核单') && record.items.some(x => x.category === APPLICATION);
   return { ready, total: claimTotals(record.tripForm, transport, accommodation).total };
 }
 export async function mergeMaterials(items: DocItem[], requireComplete = true) {
