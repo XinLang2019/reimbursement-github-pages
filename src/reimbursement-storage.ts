@@ -21,7 +21,7 @@ function finished(tx: IDBTransaction) { return new Promise<void>((resolve,reject
 let writes: Promise<unknown> = Promise.resolve();
 export function saveReimbursement(record: Reimbursement): Promise<void> {
   const saved: StoredRecord = { ...record, items: record.items.map(({file,preview,recognition,...item}) => ({...item, file:new Blob([file], {type:file.type}), fileName:file.name, fileModified:file.lastModified, preview:preview?.startsWith('data:') ? preview : undefined, recognition: /等待|正在|图片识别中|首次识别/.test(recognition || '') ? '识别未完成，请重新识别' : recognition })) };
-  const summary: RecordSummary = {id:record.id,name:record.name,createdAt:record.createdAt,updatedAt:record.updatedAt,fileCount:record.items.length,completionVersion:3,activeStep:record.activeStep,...reimbursementStatus(record)};
+  const summary: RecordSummary = {id:record.id,name:record.name,createdAt:record.createdAt,updatedAt:record.updatedAt,fileCount:record.items.length,completionVersion:4,activeStep:record.activeStep,...reimbursementStatus(record)};
   const next = writes.catch(() => undefined).then(async () => {
     const db = await openDatabase(); const tx = db.transaction(['records','summaries'],'readwrite'); const done = finished(tx);
     tx.objectStore('records').put(saved); tx.objectStore('summaries').put(summary); await done;
@@ -45,7 +45,7 @@ export async function listReimbursements(): Promise<RecordSummary[]> {
   const summaries = await new Promise<RecordSummary[]>((resolve,reject) => { const request = db.transaction('summaries','readonly').objectStore('summaries').getAll(); request.onerror=()=>reject(request.error); request.onsuccess=()=>resolve(request.result); });
   // Recheck older summaries against detailed group amounts and claim contents without changing files.
   const updated = await Promise.all(summaries.map(async summary => {
-    if (summary.completionVersion === 3) return summary;
+    if (summary.completionVersion === 4) return summary;
     const record = await new Promise<StoredRecord | undefined>((resolve,reject) => {
       const request = db.transaction('records','readonly').objectStore('records').get(summary.id);
       request.onerror=()=>reject(request.error); request.onsuccess=()=>resolve(request.result);

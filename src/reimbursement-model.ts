@@ -53,7 +53,7 @@ export function validateExpenseLines(lines: ClaimExpenseLine[]) {
   return '';
 }
 export function reimbursementClaimKey(form: TripForm, lines: ClaimExpenseLine[]) {
-  return JSON.stringify(['group-details-v1', form, lines]);
+  return JSON.stringify(['continuous-claim-v1', form, lines]);
 }
 
 function extOf(file: File) { const ext = file.name.split(".").pop()?.toLowerCase(); return ext === "jpeg" ? "jpg" : ext || "pdf"; }
