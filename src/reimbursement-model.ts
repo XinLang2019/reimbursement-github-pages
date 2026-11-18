@@ -8,8 +8,22 @@ const REPEATABLE_GROUPS = ["酒店", ...TRANSPORT];
 export function isInvoice(item: DocItem) { return /发票/.test(item.title) && !/支付|截图|水单|行程单/.test(item.title); }
 export const APPLICATION = "出差申请单";
 const frontForms = ["差旅报销审核单", "差旅费报销清单", APPLICATION];
-export function exportOrder(items: DocItem[]) {
-  return [...frontForms.flatMap(category => items.filter(item => item.category === category)), ...items.filter(item => !frontForms.includes(item.category))];
+export function materialGroups(items: DocItem[], groups: ManualGroup[] = []) {
+  const ordered: {category:string;journey:string;docs:DocItem[]}[] = [];
+  const byGroup = new Map<string, (typeof ordered)[number]>();
+  const getGroup = (category:string, journey:string) => {
+    const key = JSON.stringify([category,journey]);
+    let group = byGroup.get(key);
+    if (!group) {group={category,journey,docs:[]};byGroup.set(key,group);ordered.push(group);}
+    return group;
+  };
+  groups.forEach(group=>getGroup(group.category,group.name || group.category));
+  items.forEach(item=>getGroup(item.category,item.journey || item.category).docs.push(item));
+  return ordered;
+}
+export function exportOrder(items: DocItem[], groups: ManualGroup[] = []) {
+  const documents = materialGroups(items,groups).filter(group=>!frontForms.includes(group.category)).flatMap(group=>group.docs);
+  return [...frontForms.flatMap(category=>items.filter(item=>item.category===category)),...documents];
 }
 export function moveMaterialToGroup(items: DocItem[], fromId: string, category: string, journey: string, beforeId?: string) {
   const picked = items.find(item => item.id === fromId);
@@ -57,9 +71,11 @@ export function reimbursementClaimKey(form: TripForm, lines: ClaimExpenseLine[])
 }
 
 function extOf(file: File) { const ext = file.name.split(".").pop()?.toLowerCase(); return ext === "jpeg" ? "jpg" : ext || "pdf"; }
-export function formatFilename(item: DocItem, index: number, items: DocItem[]) {
+export function formatFilename(item: DocItem, index: number, items: DocItem[], groups: ManualGroup[] = []) {
+  const ordered = exportOrder(items,groups);
+  const orderedIndex = ordered.findIndex(doc=>doc.id===item.id);
   const prefix = CATEGORY_PREFIX[item.category] ?? 9;
-  const categoryItems = items.filter((x) => x.category === item.category);
+  const categoryItems = ordered.filter((x) => x.category === item.category);
   const groupNames = [...new Set(categoryItems.map((x) => x.journey || x.category))];
   const groupNo = groupNames.indexOf(item.journey || item.category) + 1;
   const groupItems = categoryItems.filter((x) => (x.journey || x.category) === (item.journey || item.category));
@@ -67,7 +83,7 @@ export function formatFilename(item: DocItem, index: number, items: DocItem[]) {
   const amount = item.amount.trim() ? `_${item.amount.trim()}` : "";
   if (prefix <= 3) return `${prefix}_${item.title}.${extOf(item.file)}`;
   if (REPEATABLE_GROUPS.includes(item.category)) return `${prefix}_${groupNo}_${materialNo}_${item.category}_${item.title}${amount}.${extOf(item.file)}`;
-  return `${prefix}_${index + 1}_${item.title}${amount}.${extOf(item.file)}`;
+  return `${prefix}_${(orderedIndex < 0 ? index : orderedIndex) + 1}_${item.title}${amount}.${extOf(item.file)}`;
 }
 
 
@@ -83,7 +99,7 @@ export function reimbursementStatus(record: Reimbursement) {
   const ready = record.ticketsComplete && !validateExpenseLines(lines) && !record.items.some(x => isInvoice(x) && !x.amount) && record.items.some(x => x.category === '差旅费报销清单' && x.claimKey === key) && record.items.some(x => x.category === '差旅报销审核单') && record.items.some(x => x.category === APPLICATION);
   return { ready, total: claimTotals(record.tripForm, transport, accommodation).total };
 }
-export async function mergeMaterials(items: DocItem[], requireComplete = true) {
+export async function mergeMaterials(items: DocItem[], requireComplete = true, groups: ManualGroup[] = []) {
   const out = await PDFDocument.create();
   const skipped: string[] = [];
   const payment = (item: DocItem) => item.title.trim() === "支付截图" && !frontForms.includes(item.category);
@@ -103,7 +119,7 @@ export async function mergeMaterials(items: DocItem[], requireComplete = true) {
     sheet.drawImage(image, { x: x + (cellW-width)/2, y: y + (cellH-height)/2, width, height });
     slots++;
   }
-  for (const item of exportOrder(items)) {
+  for (const item of exportOrder(items,groups)) {
     try {
       const bytes = await item.file.arrayBuffer();
       const key = groupKey(item);
@@ -181,11 +197,11 @@ export function downloadBlob(blob: Blob, name: string) {
 }
 export async function downloadRecord(record: Reimbursement, kind: 'zip' | 'pdf') {
   if (!reimbursementStatus(record).ready) throw new Error('请先进入编辑，完成三个步骤后再下载');
-  const { blob: merged } = await mergeMaterials(record.items, true);
+  const { blob: merged } = await mergeMaterials(record.items, true, record.manualGroups);
   const basename = reimbursementBasename(record);
   if (kind === 'pdf') { downloadBlob(merged, `${basename}.pdf`); return; }
   const { createMaterialsArchive } = await import('./materials-archive');
-  const ordered = exportOrder(record.items);
-  const entries = [...ordered.map((item,index)=>({file:item.file as Blob,name:formatFilename(item,index,ordered)})),{file:merged,name:`${basename}.pdf`,numbered:false}];
+  const ordered = exportOrder(record.items,record.manualGroups);
+  const entries = [...ordered.map((item,index)=>({file:item.file as Blob,name:formatFilename(item,index,ordered,record.manualGroups)})),{file:merged,name:`${basename}.pdf`,numbered:false}];
   downloadBlob(await createMaterialsArchive(entries, undefined, basename), `${basename}.zip`);
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename, expenseLines, expenseTotals, validateExpenseLines, reimbursementClaimKey, moveMaterialToGroup } from "./reimbursement-model";
+import { DocItem, ManualGroup, Reimbursement, APPLICATION, isInvoice, exportOrder, totalAmount, formatFilename, mergeMaterials, reimbursementBasename, expenseLines, expenseTotals, validateExpenseLines, reimbursementClaimKey, moveMaterialToGroup, materialGroups } from "./reimbursement-model";
 import { saveReimbursement, storageMessage } from "./reimbursement-storage";
 import MaterialPreview from "./material-preview";
 import TripClaimForm from "./trip-claim-form";
@@ -157,12 +157,8 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   const pendingInvoices = items.filter(x => isInvoice(x) && !x.amount).length;
   const guideCompleted = guideSteps.filter((step) => step.complete).length;
   const warningNotice = notice.startsWith("请") || notice.includes("暂未添加");
-  const groupedItems = useMemo(() => {
-    const result: { category: string; journey: string; docs: DocItem[] }[] = manualGroups.map((group) => ({ category: group.category, journey: group.name, docs: [] }));
-    items.forEach((item) => { const journey = item.journey || item.category; const found = result.find((group) => group.category === item.category && group.journey === journey); if (found) found.docs.push(item); else result.push({ category: item.category, journey, docs: [item] }); });
-
-    return result;
-  }, [items, manualGroups]);
+  const groupedItems = useMemo(() => materialGroups(items,manualGroups),[items,manualGroups]);
+  const orderedItems = useMemo(() => exportOrder(items,manualGroups),[items,manualGroups]);
 
   const visibleGroups = groupedItems.filter(group => activeStep === 0 ? isTicketCategory(group.category) : group.category === UPLOAD_GUIDE[activeStep].category || (activeStep === 2 && group.category === APPLICATION));
   const previewMaterials = visibleGroups.flatMap(group=>group.docs);
@@ -342,7 +338,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   function onPageDragLeave(e: DragEvent<HTMLElement>) { if (!isFileDrag(e)) return; e.preventDefault(); dragDepth.current -= 1; if (dragDepth.current <= 0) { dragDepth.current = 0; setPageDragging(false); } }
   function onPageDrop(e: DragEvent<HTMLElement>) { if (!isFileDrag(e)) return; e.preventDefault(); dragDepth.current = 0; setPageDragging(false); addFiles(e.dataTransfer.files); }
   function downloadRenamed(item: DocItem, index: number) {
-    const url = URL.createObjectURL(item.file); const a = document.createElement("a"); a.href = url; a.download = formatFilename(item, index, items); a.click(); URL.revokeObjectURL(url); setNotice(`已下载：${formatFilename(item, index, items)}`);
+    const url = URL.createObjectURL(item.file); const a = document.createElement("a"); a.href = url; a.download = formatFilename(item, index, items, manualGroups); a.click(); URL.revokeObjectURL(url); setNotice(`已下载：${formatFilename(item, index, items, manualGroups)}`);
   }
   function exportProblem() {
     if (!items.length) return "请先上传报销材料";
@@ -356,14 +352,14 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
   async function downloadMaterials() {
     if (archiving || exporting) return;
     const problem = exportProblem(); if (problem) { setNotice(problem); return; }
-    const ordered = exportOrder(items);
+    const ordered = exportOrder(items,manualGroups);
     setArchiving(true); setNotice("正在整理备份材料…");
     try {
       const mergedPdf = await buildMergedPdf(true);
       if (!mergedPdf) return;
       const { createMaterialsArchive } = await import("./materials-archive");
       const basename = reimbursementBasename({name: initial.name, tripForm});
-      const entries = [...ordered.map((item, index) => ({ file: item.file as Blob, name: formatFilename(item, index, ordered) })), { file: mergedPdf, name: `${basename}.pdf`, numbered: false }];
+      const entries = [...ordered.map((item, index) => ({ file: item.file as Blob, name: formatFilename(item, index, ordered, manualGroups) })), { file: mergedPdf, name: `${basename}.pdf`, numbered: false }];
       const blob = await createMaterialsArchive(entries, (done, total) => setNotice(done === total ? `正在压缩 ${total} 份材料…` : `正在读取材料 ${done} / ${total}…`), basename);
       const url = URL.createObjectURL(blob); const anchor = document.createElement("a");
       anchor.href = url; anchor.download = `${basename}.zip`; anchor.style.display = "none";
@@ -377,7 +373,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
     const problem = exportProblem(); if (problem) { setNotice(problem); return; }
     setExporting(true); setNotice("正在合并材料，请稍候…");
     try {
-      const { blob, pageCount, skipped } = await mergeMaterials(items, requireComplete);
+      const { blob, pageCount, skipped } = await mergeMaterials(items, requireComplete, manualGroups);
       setNotice(skipped.length ? `PDF 已生成，共 ${pageCount} 页；已跳过 ${skipped.length} 个无法读取的文件：${skipped.slice(0, 2).join("、")}${skipped.length > 2 ? "…" : ""}` : `PDF 已生成，共 ${pageCount} 页`); return blob;
     } catch (error) { setNotice(error instanceof Error ? error.message : "PDF 生成失败，请重试"); return undefined; } finally { setExporting(false); }
   }
@@ -494,9 +490,9 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
           <label>地点 / 路线<input maxLength={70} value={details?.location || ''} placeholder={group.category === '酒店' ? '例如：上海·酒店所在地' : '例如：合肥 → 上海'} onChange={e=>updateGroupDetails(group.category,group.journey,{location:e.target.value})}/></label>
         </div>}
         {requiredMaterials.length > 0 && <div className={`material-requirements ${missingMaterials.length ? "incomplete" : "complete"}`}><div className="requirements-header"><strong>{group.category === "酒店" ? "住宿" : group.category}报销需要上传以下 {requiredMaterials.length} 项材料</strong><span>{missingMaterials.length ? `还缺 ${missingMaterials.length} 项：${missingMaterials.join("、")}` : "全部材料已上传 ✓"}</span></div><div className="requirements-list">{requiredMaterials.map((material) => { const uploaded = hasRequiredMaterial(group.docs, material); return <span className={`requirement-item ${uploaded ? "uploaded" : "missing"}`} key={material}><b>{uploaded ? "✓" : "+"}</b>{material}<small>{uploaded ? "已上传" : "待上传"}</small></span>; })}</div></div>}
-        <div className="group-docs">{group.docs.map((item) => { const index = items.findIndex((x) => x.id === item.id); return <article className={`file-row ${dragId === item.id ? "dragging" : ""}`} key={item.id} draggable onDragStart={e => startMaterialDrag(e,item.id)} onDragEnd={endMaterialDrag} onDragOver={e => { if (materialDragRef.current) {e.preventDefault();e.dataTransfer.dropEffect="move";} }} onDrop={e => dropMaterial(e,group.category,group.journey,item.id)}>
+        <div className="group-docs">{group.docs.map((item) => { const index = orderedItems.findIndex((x) => x.id === item.id); return <article className={`file-row ${dragId === item.id ? "dragging" : ""}`} key={item.id} draggable onDragStart={e => startMaterialDrag(e,item.id)} onDragEnd={endMaterialDrag} onDragOver={e => { if (materialDragRef.current) {e.preventDefault();e.dataTransfer.dropEffect="move";} }} onDrop={e => dropMaterial(e,group.category,group.journey,item.id)}>
         <div className="handle" title={activeStep === 0 ? "拖动排序，或移入其他大类" : "拖动排序"}>⋮⋮</div><button type="button" className={`thumb ${item.preview ? "image" : "pdf"}`} title="点击浏览原始资料" aria-label={`预览 ${item.file.name}`} onClick={e=>{e.stopPropagation();setMaterialPreviewId(item.id);}}>{item.preview ? <img src={item.preview} alt="材料预览" draggable={false} /> : <><span>PDF</span><b>{index + 1}</b></>}</button>
-        <div className="file-main"><div className="auto-label"><span>自动命名</span><button type="button" onClick={e=>{e.stopPropagation();setMaterialPreviewId(item.id);}}>预览资料</button><button onClick={(e) => { e.stopPropagation(); downloadRenamed(item, index); }}>下载此文件</button></div><button type="button" className="generated-name material-preview-name" title="点击浏览原始资料" onClick={e=>{e.stopPropagation();setMaterialPreviewId(item.id);}}>{formatFilename(item, index, items)}</button><div className="original-name">原文件：{item.file.name}</div></div>
+        <div className="file-main"><div className="auto-label"><span>自动命名</span><button type="button" onClick={e=>{e.stopPropagation();setMaterialPreviewId(item.id);}}>预览资料</button><button onClick={(e) => { e.stopPropagation(); downloadRenamed(item, index); }}>下载此文件</button></div><button type="button" className="generated-name material-preview-name" title="点击浏览原始资料" onClick={e=>{e.stopPropagation();setMaterialPreviewId(item.id);}}>{formatFilename(item, index, items, manualGroups)}</button><div className="original-name">原文件：{item.file.name}</div></div>
         <label>材料名称{MATERIAL_OPTIONS[item.category] ? <select aria-label={`${item.file.name}的材料名称`} value={item.title || ""} onChange={(e) => changeMaterial(item, e.target.value)}><option value="" disabled>请选择材料</option>{item.title && !MATERIAL_OPTIONS[item.category].includes(item.title) && <option value={item.title}>{item.title}（移入材料）</option>}{MATERIAL_OPTIONS[item.category].map(name => <option key={name} value={name}>{name}</option>)}</select> : <input value={item.title} onChange={(e) => update(item.id, { title: e.target.value })} />}</label>
         <label className="amount">金额（元）<input inputMode="decimal" placeholder={isInvoice(item) ? "待识别 / 手动填写" : "不计入汇总"} disabled={!isInvoice(item)} value={item.amount} onChange={(e) => { const value = e.target.value; if (/^\d*(?:\.\d{0,2})?$/.test(value)) update(item.id, { amount: value }); }} />{isInvoice(item) && <small>{item.recognition || "请核对发票金额"}<button type="button" disabled={!!recognizing} onClick={() => void recognizeInvoice(item)}>重新识别</button></small>}</label>
         <button className="remove" aria-label="删除文件" onClick={() => removeItem(item)}>×</button>
@@ -508,7 +504,7 @@ export default function ReimbursementEditor({ initial, onBack }: { initial: Reim
       </div>}
       {activeStep === 0 && <section className="amount-summary" aria-label="报销金额汇总"><div><span>住宿总金额</span><strong>¥{accommodationTotal.toFixed(2)}</strong></div><div><span>交通总金额（飞机、高铁、打车）</span><strong>¥{transportTotal.toFixed(2)}</strong></div><div><span>合计</span><strong>¥{(accommodationTotal + transportTotal).toFixed(2)}</strong></div><p>按每个大类的报销金额汇总，支付截图不重复计费。报销金额留空时使用发票合计，可扣除不可报销费用。请填写各组日期和地点；补助仍按整次出差的起止日期计算。{recognizing > 0 ? `正在识别 ${recognizing} 份发票…` : pendingInvoices > 0 ? `还有 ${pendingInvoices} 份发票待填写金额。` : "请核对识别结果。"}</p><button type="button" disabled={!!recognizing || !!pendingInvoices || !items.some(x => REPEATABLE_GROUPS.includes(x.category))} onClick={() => { const error = validateExpenseLines(expenseRows); if(error) {setNotice("请检查：" + error);return;} setTicketsComplete(true); goToStep(1); }}>确认金额，进入第二步</button></section>}
       {activeStep > 0 && <div className="step-page-actions"><button type="button" className="secondary" onClick={() => goToStep(activeStep - 1)}>返回上一步</button>{activeStep === 1 && <button type="button" className="primary" disabled={!ticketsComplete || !guideSteps[1].complete} onClick={() => goToStep(2)}>清单已生成，进入第三步</button>}</div>}
-      {activeStep === 2 && <p className="export-note">PDF 顺序：差旅报销审核单 → 差旅费报销清单 → 出差申请单→ 其余材料按原顺序。每个大类分组内的支付截图超过 2 张时，连续的截图每页最多 4 张，遇到其他材料开始新页；ZIP 保留每份原文件及合并 PDF。</p>}
+      {activeStep === 2 && <p className="export-note">PDF 顺序：差旅报销审核单 → 差旅费报销清单 → 出差申请单→ 其余材料按页面大类顺序及各类内材料顺序。每个大类分组内的支付截图超过 2 张时，连续的截图每页最多 4 张，遇到其他材料开始新页；ZIP 保留每份原文件及合并 PDF。</p>}
 
     </section>
     {activeStep === 0 && <aside className="rule-card"><div><span>各类别材料提示</span><strong>上传后自动核对</strong></div><ol><li><b>住</b> 酒店：发票、酒店水单、支付截图</li><li><b>✈</b> 飞机 / 高铁：发票、支付截图</li><li><b>●</b> 打车：发票、行程单、支付截图</li></ol></aside>}
